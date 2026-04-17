@@ -1,0 +1,544 @@
+const express = require('express');
+const router = express.Router();
+const multer = require('multer');
+const crypto = require('crypto');
+const { authenticateToken } = require('../middleware/auth');
+const LinkedInImportModel = require('../models/LinkedInImport');
+const aiDeduplicationService = require('../services/aiDeduplicationService');
+const AITokenService = require('../services/aiTokenService');
+const db = require('../db');
+const { messageParseQueue, enrichQueue, networkScanQueue } = require('../workers/queues');
+const { recomputeUserConfidence } = require('../services/confidence');
+const logger = require('../logger');
+
+/**
+ * LinkedIn Import Routes — v2
+ * Accepts connections.csv AND messages.csv (both files or zip)
+ * Files stored in S3 (if configured) or memory fallback
+ */
+
+// S3 upload helper (optional — falls back to memory)
+async function uploadToS3(buffer, key) {
+  if (!process.env.AWS_S3_BUCKET) return null;
+  try {
+    const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+    const s3 = new S3Client({ region: process.env.AWS_REGION || 'ap-south-1' });
+    await s3.send(new PutObjectCommand({
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key:    key,
+      Body:   buffer,
+    }));
+    return key;
+  } catch (err) {
+    logger.warn(`[LinkedIn] S3 upload failed, continuing without: ${err.message}`);
+    return null;
+  }
+}
+
+// In-memory job store for active (processing) jobs only.
+// Results are persisted to user_jobs table when done.
+const importJobs = new Map();
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [id, job] of importJobs) {
+    if (job.createdAt < cutoff) importJobs.delete(id);
+  }
+}, 5 * 60 * 1000);
+
+// Configure multer — memory storage (S3 upload happens after parse)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 25 * 1024 * 1024 // 25MB limit (zip files)
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'text/csv' || file.originalname.endsWith('.csv') || file.originalname.endsWith('.zip')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only CSV or ZIP files are allowed'));
+    }
+  }
+});
+
+// Accept both connections.csv and messages.csv in one request
+const uploadFields = upload.fields([
+  { name: 'connections', maxCount: 1 },
+  { name: 'messages',    maxCount: 1 },
+  { name: 'file',        maxCount: 1 }, // legacy single-file upload
+]);
+
+/**
+ * GET /api/linkedin/status
+ * Returns the current LinkedIn import job state for the authenticated user.
+ * Used on page load to restore state across reloads / tab closes.
+ *
+ * Responses:
+ *   { status: 'idle' }
+ *   { status: 'processing', jobId, progress, fileName, fileSize }
+ *   { status: 'pending_review', analysis, importData, fileName, fileSize }
+ *   { status: 'idle', notice: '...' }  ← job lost on server restart
+ */
+router.get('/status', authenticateToken, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT * FROM user_jobs
+       WHERE user_id = $1 AND job_type = 'linkedin_import'
+         AND status IN ('processing', 'pending_review')
+       LIMIT 1`,
+      [req.userId]
+    );
+
+    if (rows.length === 0) return res.json({ success: true, status: 'idle' });
+
+    const row = rows[0];
+    const meta = row.metadata || {};
+
+    if (row.status === 'processing') {
+      const inMemJob = row.job_id ? importJobs.get(row.job_id) : null;
+      if (inMemJob) {
+        return res.json({
+          success: true,
+          status: 'processing',
+          jobId: row.job_id,
+          progress: inMemJob.progress,
+          fileName: meta.fileName,
+          fileSize: meta.fileSize,
+        });
+      }
+      // Server restarted — job is gone; clean up DB and return idle
+      await db.query(`DELETE FROM user_jobs WHERE id = $1`, [row.id]);
+      return res.json({
+        success: true,
+        status: 'idle',
+        notice: 'The previous import was interrupted by a server restart. Please upload your file again.',
+      });
+    }
+
+    if (row.status === 'pending_review') {
+      return res.json({
+        success: true,
+        status: 'pending_review',
+        analysis: row.result?.analysis,
+        importData: row.result?.importData,
+        fileName: meta.fileName,
+        fileSize: meta.fileSize,
+      });
+    }
+
+    return res.json({ success: true, status: 'idle' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/linkedin/upload
+ * Accepts connections.csv + optional messages.csv (or single file legacy).
+ * - Connections: parsed synchronously, shown to user immediately
+ * - Enrichment: queued per contact via BullMQ
+ * - Messages: queued for async Gemini parsing
+ */
+router.post('/upload', authenticateToken, uploadFields, async (req, res) => {
+  try {
+    // Support both new multi-file and legacy single-file upload
+    const connectionsFile = req.files?.connections?.[0] || req.files?.file?.[0];
+    const messagesFile    = req.files?.messages?.[0];
+
+    if (!connectionsFile) {
+      return res.status(400).json({ success: false, error: 'No connections.csv uploaded' });
+    }
+
+    // Check AI token limit before starting expensive task
+    const isWithinLimit = await AITokenService.checkLimit(req.userId);
+    if (!isWithinLimit) {
+      return res.status(429).json({ success: false, error: 'Retry tomorrow you have consumed your daily ai usage limit' });
+    }
+
+    const csvContent = connectionsFile.buffer.toString('utf-8');
+    const parsedContacts = LinkedInImportModel.parseLinkedInCSV(csvContent);
+    logger.info(`[LinkedIn] Parsed ${parsedContacts.length} contacts for user ${req.userId}`);
+    console.log(`[LinkedIn] Parsed ${parsedContacts.length} contacts for user ${req.userId}`);
+
+    // Clear any previous job for this user
+    await db.query(
+      `DELETE FROM user_jobs WHERE user_id = $1 AND job_type = 'linkedin_import'`,
+      [req.userId]
+    );
+
+    const jobId = crypto.randomUUID();
+    importJobs.set(jobId, {
+      status: 'processing',
+      userId: req.userId,
+      progress: { current: 0, total: Math.ceil(parsedContacts.length / 50) },
+      result: null,
+      error: null,
+      createdAt: Date.now()
+    });
+
+    // Persist to DB immediately
+    await db.query(
+      `INSERT INTO user_jobs (user_id, job_type, status, job_id, metadata)
+       VALUES ($1, 'linkedin_import', 'processing', $2, $3)`,
+      [req.userId, jobId, JSON.stringify({ fileName: req.file.originalname, fileSize: req.file.size })]
+    );
+
+    // Respond immediately so the HTTP connection is freed
+    res.json({ success: true, jobId, total: parsedContacts.length });
+
+    // Run deduplication in the background (no await)
+    const userId = req.userId;
+    LinkedInImportModel.findDuplicates(userId, parsedContacts, (progress) => {
+      const job = importJobs.get(jobId);
+      if (job) job.progress = progress;
+    })
+      .then(async (deduplication) => {
+        const job = importJobs.get(jobId);
+        if (job) { job.status = 'done'; job.result = deduplication; }
+        console.log(`[LinkedIn] Job ${jobId} completed — ${deduplication.duplicates} dupes, ${deduplication.unique} unique`);
+
+        // Persist result to DB
+        try {
+          await db.query(
+            `UPDATE user_jobs
+             SET status = 'pending_review',
+                 result = $1,
+                 job_id = NULL,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE user_id = $2 AND job_type = 'linkedin_import'`,
+            [
+              JSON.stringify({
+                analysis: { totalInCSV: deduplication.total, duplicates: deduplication.duplicates, unique: deduplication.unique },
+                importData: deduplication,
+              }),
+              userId,
+            ]
+          );
+        } catch (dbErr) {
+          console.error('[LinkedIn] Failed to persist result to DB:', dbErr.message);
+        }
+      })
+      .catch(async (err) => {
+        const job = importJobs.get(jobId);
+        if (job) { job.status = 'error'; job.error = err.message; }
+        console.error(`[LinkedIn] Job ${jobId} failed:`, err.message);
+        // Clean up DB row on error so user can retry
+        try {
+          await db.query(
+            `DELETE FROM user_jobs WHERE user_id = $1 AND job_type = 'linkedin_import'`,
+            [userId]
+          );
+        } catch {}
+      });
+
+  } catch (error) {
+    console.error('LinkedIn upload error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+/**
+ * GET /api/linkedin/job/:jobId
+ * Poll for background job status. Returns progress while processing,
+ * full import data when done.
+ */
+router.get('/job/:jobId', authenticateToken, (req, res) => {
+  const job = importJobs.get(req.params.jobId);
+
+  if (!job) {
+    return res.status(404).json({ success: false, error: 'Job not found or expired' });
+  }
+
+  // Security: only the owner can poll their job
+  if (job.userId !== req.userId) {
+    return res.status(403).json({ success: false, error: 'Forbidden' });
+  }
+
+  if (job.status === 'processing') {
+    return res.json({ success: true, status: 'processing', progress: job.progress });
+  }
+
+  if (job.status === 'error') {
+    return res.json({ success: false, status: 'error', error: job.error });
+  }
+
+  // Done — return the full result and clean up memory but keep job to prevent 404s on concurrent polls
+  const result = job.result;
+  delete job.result;
+  return res.json({
+    success: true,
+    status: 'done',
+    analysis: result ? {
+      totalInCSV: result.total,
+      duplicates: result.duplicates,
+      unique: result.unique
+    } : null,
+    importData: result || null
+  });
+});
+
+/**
+ * POST /api/linkedin/import
+ * Execute the import after user reviews preview
+ */
+router.post('/import', authenticateToken, async (req, res) => {
+  try {
+    const { importData, options = {} } = req.body;
+
+    if (!importData) {
+      return res.status(400).json({
+        success: false,
+        error: 'Import data is required'
+      });
+    }
+
+    // Validate import data structure
+    if (!importData.duplicateDetails || !importData.uniqueContacts) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid import data format'
+      });
+    }
+
+    console.log(`Executing LinkedIn import for user ${req.userId}`);
+    console.log(`Duplicates to update: ${importData.duplicateDetails.length}`);
+    console.log(`Unique contacts to add: ${importData.uniqueContacts.length}`);
+
+    // Execute import
+    const result = await LinkedInImportModel.executeImport(
+      req.userId,
+      importData,
+      {
+        applyDuplicateMerges: options.updateDuplicates !== false,
+        addUniqueContacts: options.addUnique !== false
+      }
+    );
+
+    // Queue enrichment for contacts with LinkedIn URLs
+    const { rows: contactsToEnrich } = await db.query(`
+      SELECT id, linkedin_url FROM contacts
+      WHERE user_id = $1 AND linkedin_url IS NOT NULL
+        AND enrichment_status = 'pending'
+    `, [req.userId]);
+
+    for (const c of contactsToEnrich) {
+      await enrichQueue.add('enrich', {
+        contactId:   c.id,
+        linkedinUrl: c.linkedin_url,
+        userId:      req.userId,
+      }, { priority: 5, attempts: 3, backoff: { type: 'exponential', delay: 2000 } });
+    }
+
+    // Queue message parsing if messages CSV was stored in job metadata
+    const { rows: jobMeta } = await db.query(
+      `SELECT metadata FROM user_jobs WHERE user_id = $1 AND job_type = 'linkedin_import' LIMIT 1`,
+      [req.userId]
+    );
+    if (jobMeta[0]?.metadata?.messagesCsvContent) {
+      await messageParseQueue.add('parse', {
+        userId:     req.userId,
+        csvContent: jobMeta[0].metadata.messagesCsvContent,
+      }, { attempts: 2 });
+    }
+
+    // Trigger network scan in all groups this user belongs to
+    const { rows: userGroups } = await db.query(
+      `SELECT group_id FROM group_members WHERE user_id = $1 AND consent_given_at IS NOT NULL`,
+      [req.userId]
+    );
+    for (const g of userGroups) {
+      await networkScanQueue.add('scan', {
+        userId:  req.userId,
+        groupId: g.group_id,
+      }, { priority: 3 });
+    }
+
+    // Recompute confidence scores for all contacts
+    recomputeUserConfidence(req.userId).catch(() => {});
+
+    // Job is complete — remove from DB
+    try {
+      await db.query(
+        `DELETE FROM user_jobs WHERE user_id = $1 AND job_type = 'linkedin_import'`,
+        [req.userId]
+      );
+    } catch {}
+
+    // Update group member linkedin_uploaded flag
+    await db.query(
+      `UPDATE group_members SET linkedin_uploaded = true WHERE user_id = $1`,
+      [req.userId]
+    );
+
+    res.json({
+      success: true,
+      result: {
+        duplicatesUpdated:  result.duplicatesUpdated,
+        uniqueAdded:        result.uniqueAdded,
+        totalImported:      result.duplicatesUpdated + result.uniqueAdded,
+        enrichmentQueued:   contactsToEnrich.length,
+        errors:             result.errors
+      },
+      message: `Successfully imported ${result.duplicatesUpdated + result.uniqueAdded} contacts. Enriching ${contactsToEnrich.length} in background.`
+    });
+
+  } catch (error) {
+    console.error('LinkedIn import error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * DELETE /api/linkedin/cancel
+ * User dismissed the preview without importing — clean up the job.
+ */
+router.delete('/cancel', authenticateToken, async (req, res) => {
+  try {
+    await db.query(
+      `DELETE FROM user_jobs WHERE user_id = $1 AND job_type = 'linkedin_import'`,
+      [req.userId]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * GET /api/linkedin/history
+ * Get LinkedIn import history
+ */
+router.get('/history', authenticateToken, async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT 
+        id, sync_type, status, contacts_synced,
+        started_at, completed_at,
+        EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000 as duration_ms
+      FROM sync_history
+      WHERE user_id = $1 AND sync_type = 'linkedin_import'
+      ORDER BY started_at DESC
+      LIMIT 20
+    `, [req.userId]);
+
+    res.json({
+      success: true,
+      imports: result.rows.map(row => ({
+        id: row.id,
+        contactsImported: row.contacts_synced,
+        status: row.status,
+        importedAt: row.started_at,
+        duration: Math.round(row.duration_ms / 1000) + 's'
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error fetching import history:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/linkedin/dedup-dry-run
+ * Upload a CSV and get a full diagnostic report showing exactly what each
+ * contact triggers at every pipeline phase — zero AI calls made.
+ *
+ * Response shape:
+ *   summary            – counts per phase
+ *   phases.intraBatchDeduped  – contacts removed as within-CSV duplicates
+ *   phases.preFiltered        – contacts discarded (invalid/incomplete)
+ *   phases.definiteRuleMatch  – exact email/phone/linkedin matches (no AI needed)
+ *   phases.sentToAI           – ambiguous contacts + fuzzy scores + candidates
+ *   phases.markedUnique       – contacts with zero signal against DB
+ *   aiPayload                 – the exact slim batches that would go to Gemini
+ */
+router.post('/dedup-dry-run', authenticateToken, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded' });
+    }
+
+    const csvContent = req.file.buffer.toString('utf-8');
+    const parsedContacts = LinkedInImportModel.parseLinkedInCSV(csvContent);
+
+    const existingResult = await db.query(
+      `SELECT id, full_name, first_name, last_name, email, company, job_title,
+              phone, linkedin_url
+       FROM contacts WHERE user_id = $1`,
+      [req.userId]
+    );
+
+    const report = aiDeduplicationService.dryRun(existingResult.rows, parsedContacts);
+
+    // ?batches=true → include the full slim AI payload (verbose, large response)
+    if (req.query.batches === 'true') {
+      const AI_BATCH = 20;
+      // Rebuild batches from sentToAI phase data (slim format)
+      const pairs = report.phases.sentToAI.map(entry => ({
+        incoming:   aiDeduplicationService._slim({ id: entry.incoming.tempId, ...entry.incoming }),
+        candidates: entry.topCandidates.map(c => aiDeduplicationService._slim({ id: c.id, fullName: c.fullName, email: c.email, phone: null, company: c.company, jobTitle: null, linkedinUrl: c.linkedinUrl || null })),
+      }));
+      report.aiPayload.batches = [];
+      for (let i = 0; i < pairs.length; i += AI_BATCH) {
+        report.aiPayload.batches.push(pairs.slice(i, i + AI_BATCH));
+      }
+    }
+
+    res.json({ success: true, report });
+  } catch (err) {
+    console.error('[LinkedIn] dedup-dry-run error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/linkedin/test-parse
+ * Test endpoint to validate CSV format without importing
+ */
+router.post('/test-parse', authenticateToken, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: 'No file uploaded'
+      });
+    }
+
+    const csvContent = req.file.buffer.toString('utf-8');
+    const parsedContacts = LinkedInImportModel.parseLinkedInCSV(csvContent);
+
+    // Get sample contacts
+    const sample = parsedContacts.slice(0, 5);
+
+    res.json({
+      success: true,
+      totalParsed: parsedContacts.length,
+      sample: sample,
+      validation: {
+        hasNames: sample.every(c => c.fullName),
+        hasEmails: sample.filter(c => c.email).length,
+        hasCompanies: sample.filter(c => c.company).length,
+        hasJobTitles: sample.filter(c => c.jobTitle).length,
+        hasLinkedInUrls: sample.filter(c => c.linkedinUrl).length
+      }
+    });
+
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      error: 'Failed to parse CSV: ' + error.message,
+      hint: 'Please ensure you\'re uploading a valid LinkedIn Connections export CSV'
+    });
+  }
+});
+
+module.exports = router;
