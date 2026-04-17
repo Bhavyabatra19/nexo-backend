@@ -175,11 +175,16 @@ router.post('/upload', authenticateToken, uploadFields, async (req, res) => {
       createdAt: Date.now()
     });
 
-    // Persist to DB immediately
+    // Persist to DB immediately — store messages CSV so worker can parse it async
+    const jobMeta = {
+      fileName:           connectionsFile.originalname,
+      fileSize:           connectionsFile.size,
+      messagesCsvContent: messagesFile ? messagesFile.buffer.toString('utf-8') : null,
+    };
     await db.query(
       `INSERT INTO user_jobs (user_id, job_type, status, job_id, metadata)
        VALUES ($1, 'linkedin_import', 'processing', $2, $3)`,
-      [req.userId, jobId, JSON.stringify({ fileName: req.file.originalname, fileSize: req.file.size })]
+      [req.userId, jobId, JSON.stringify(jobMeta)]
     );
 
     // Respond immediately so the HTTP connection is freed
