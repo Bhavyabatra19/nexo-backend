@@ -8,15 +8,10 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: nexo-db
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: nexo-redis
-          property: connectionString
+      # Set these manually in Render dashboard:
+      # DATABASE_URL  → from neon.tech
+      # REDIS_URL     → from upstash.com
+      # All other keys from .env.example
 
   - type: worker
     name: nexo-worker
@@ -24,20 +19,6 @@ services:
     buildCommand: npm ci
     startCommand: node workers/index.js
     envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: nexo-db
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: nexo-redis
-          property: connectionString
-
-databases:
-  - name: nexo-db
-    plan: free
-
-  - name: nexo-redis
-    plan: free
-    ipAllowList: []
+      - key: NODE_ENV
+        value: production
+      # DATABASE_URL and REDIS_URL inherited from dashboard env group
