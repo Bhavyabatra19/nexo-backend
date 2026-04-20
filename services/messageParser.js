@@ -12,7 +12,11 @@ const logger = require('../logger');
 const { recomputeConfidence } = require('./confidence');
 const crypto = require('crypto');
 
-const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+let genAI = null;
+function getGenAI() {
+  if (!genAI && process.env.GEMINI_API_KEY) genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  return genAI;
+}
 
 /**
  * Parse LinkedIn messages.csv into per-contact conversation groups.
@@ -201,7 +205,9 @@ async function summarizeConversation(contactName, messages) {
   }
 
   try {
-    const response = await genAI.models.generateContent({
+    const ai = getGenAI();
+    if (!ai) return { text: null, topics: [], sentiment: 'neutral' };
+    const response = await ai.models.generateContent({
       model: 'gemini-2.0-flash-lite',
       contents: [{
         parts: [{

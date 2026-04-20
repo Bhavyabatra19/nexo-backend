@@ -15,7 +15,11 @@ const { GoogleGenAI } = require('@google/genai');
 const { notificationQueue } = require('../workers/queues');
 const logger = require('../logger');
 
-const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+let genAI = null;
+function getGenAI() {
+  if (!genAI && process.env.GEMINI_API_KEY) genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  return genAI;
+}
 
 // 5 intro requests per user per 7 days
 const introRateLimit = rateLimit({
@@ -121,7 +125,9 @@ router.post('/:id/approve', authenticateToken, async (req, res) => {
   // Generate AI intro draft using Gemini Pro (user-facing quality matters here)
   let aiDraft = '';
   try {
-    const response = await genAI.models.generateContent({
+    const ai = getGenAI();
+    if (!ai) throw new Error('GEMINI_API_KEY not configured');
+    const response = await ai.models.generateContent({
       model: 'gemini-2.0-flash',
       contents: [{
         parts: [{
