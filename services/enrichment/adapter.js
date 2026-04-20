@@ -1,19 +1,21 @@
 /**
  * Enrichment Adapter — swap providers by changing ENRICHMENT_PROVIDER env var.
- * Supports: proxycurl (default), scrapingdog
+ * Supports: linkdapi (default), scrapingdog
  * Falls back to secondary provider on failure.
  */
 
-const proxycurl = require('./proxycurl');
+const linkdapi   = require('./linkdapi');
 const scrapingdog = require('./scrapingdog');
 const db = require('../../db');
 const logger = require('../../logger');
 
-const providers = { proxycurl, scrapingdog };
+// proxycurl.js kept in repo for reference but Proxycurl shut down July 2025.
+// Default provider is now linkdapi; scrapingdog is fallback.
+const providers = { linkdapi, scrapingdog };
 
 async function enrichContact(contactId, linkedinUrl, userId) {
-  const primary   = process.env.ENRICHMENT_PROVIDER || 'proxycurl';
-  const secondary = primary === 'proxycurl' ? 'scrapingdog' : 'proxycurl';
+  const primary   = process.env.ENRICHMENT_PROVIDER || 'linkdapi';
+  const secondary = primary === 'linkdapi' ? 'scrapingdog' : 'linkdapi';
 
   let result = null;
 

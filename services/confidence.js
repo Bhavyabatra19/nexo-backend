@@ -82,7 +82,8 @@ async function recomputeConfidence(contactId) {
   }
 
   if (s.enrichment_status === 'enriched') {
-    if (s.enrichment_provider === 'proxycurl') {
+    // linkdapi and proxycurl both return full profile data — same high-quality weight
+    if (s.enrichment_provider === 'proxycurl' || s.enrichment_provider === 'linkdapi') {
       score += SOURCE_WEIGHTS.proxycurl_enriched;
       breakdown.proxycurl_enriched = SOURCE_WEIGHTS.proxycurl_enriched;
     } else {
