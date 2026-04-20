@@ -3,7 +3,7 @@
  * Fetches public LinkedIn profile data — no cookies, GDPR compliant.
  * Docs: https://linkdapi.com/docs
  * Auth: X-linkdapi-apikey header
- * Cost: ~$0.005–0.01/profile (same ballpark as old Proxycurl)
+ * Cost: ~$0.005–0.01/profile
  */
 
 const axios = require('axios');
@@ -18,40 +18,43 @@ async function enrich(linkedinUrl) {
 
   const response = await axios.get('https://linkdapi.com/api/v1/profile/full', {
     params: { username },
-    headers: {
-      'X-linkdapi-apikey': process.env.LINKDAPI_KEY,
-    },
+    headers: { 'X-linkdapi-apikey': process.env.LINKDAPI_KEY },
     timeout: 30000,
   });
 
-  // LinkdAPI wraps data in { success, statusCode, data: { ... } }
-  const d = response.data?.data || response.data;
+  // Response shape: { success, statusCode, data: { ... } }
+  if (!response.data?.success) {
+    throw new Error(`LinkdAPI error: ${response.data?.message || 'unknown'}`);
+  }
+  const d = response.data.data;
   if (!d) throw new Error('No data returned from LinkdAPI');
 
-  const currentExp = (d.experiences || []).find(e => !e.endDate) || d.experiences?.[0];
+  // fullPositions has full work history; end.year === 0 means current role
+  const positions = d.fullPositions || d.position || [];
+  const currentPos = positions.find(p => !p.end?.year) || positions[0];
 
   return {
-    bio:             d.summary || d.about || null,
-    occupation:      d.headline || currentExp?.title || null,
-    company:         currentExp?.company || d.company || null,
-    profile_pic_url: d.profilePictureURL || d.profilePicUrl || null,
+    bio:             d.summary || null,
+    occupation:      d.headline || currentPos?.title || null,
+    company:         currentPos?.companyName || null,
+    profile_pic_url: d.profilePicture || null,
     skills:          (d.skills || []).map(s => s.name || s).filter(Boolean),
-    experiences:     (d.experiences || []).map(e => ({
-      title:   e.title,
-      company: e.company,
-      start:   e.startDate,
-      end:     e.endDate,
-      current: !e.endDate,
+    experiences:     positions.map(p => ({
+      title:   p.title,
+      company: p.companyName,
+      start:   p.start?.year || null,
+      end:     p.end?.year || null,
+      current: !p.end?.year,
     })),
-    education:       (d.education || []).map(e => ({
-      school: e.school,
+    education:       (d.educations || []).map(e => ({
+      school: e.schoolName,
       degree: e.degree,
       field:  e.fieldOfStudy,
-      start:  e.startDate,
-      end:    e.endDate,
+      start:  e.start?.year || null,
+      end:    e.end?.year || null,
     })),
-    city:        d.location?.city || d.location?.split?.(',')[0]?.trim() || null,
-    country:     d.location?.country || d.location?.split?.(',').slice(-1)[0]?.trim() || null,
+    city:        d.geo?.city || null,
+    country:     d.geo?.country || null,
     connections: d.connectionsCount || null,
   };
 }
