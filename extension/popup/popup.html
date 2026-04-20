@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nexo</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+  <!-- ── Not authenticated ── -->
+  <div id="view-auth" class="view hidden">
+    <div class="logo-row">
+      <img src="../icons/icon48.png" class="logo" alt="Nexo" />
+      <span class="logo-name">Nexo</span>
+    </div>
+    <p class="tagline">Your network, organized.</p>
+
+    <div class="card">
+      <p class="card-label">Paste your Nexo API token</p>
+      <input id="token-input" type="password" placeholder="ey..." autocomplete="off" />
+      <p class="hint">
+        Get your token from
+        <a href="https://app.nexo.in/settings/extensions" target="_blank">nexo.in → Settings → Extension Token</a>
+      </p>
+      <button id="connect-btn" class="btn btn-primary">Connect</button>
+      <p id="auth-error" class="error hidden"></p>
+    </div>
+  </div>
+
+  <!-- ── Authenticated ── -->
+  <div id="view-main" class="view hidden">
+    <div class="header">
+      <div class="logo-row">
+        <img src="../icons/icon48.png" class="logo-sm" alt="Nexo" />
+        <span class="logo-name">Nexo</span>
+      </div>
+      <button id="disconnect-btn" class="btn-ghost">Disconnect</button>
+    </div>
+
+    <!-- Sync status card -->
+    <div class="card" id="sync-card">
+      <div class="sync-row">
+        <div>
+          <p class="card-label">LinkedIn Sync</p>
+          <p id="sync-status-text" class="sync-status">Checking…</p>
+        </div>
+        <div id="sync-icon" class="sync-icon">⏳</div>
+      </div>
+
+      <div class="stat-row">
+        <div class="stat">
+          <span id="stat-contacts" class="stat-value">—</span>
+          <span class="stat-label">Contacts</span>
+        </div>
+        <div class="stat">
+          <span id="stat-enriched" class="stat-value">—</span>
+          <span class="stat-label">Enriched</span>
+        </div>
+        <div class="stat">
+          <span id="stat-last-sync" class="stat-value">—</span>
+          <span class="stat-label">Last sync</span>
+        </div>
+      </div>
+
+      <!-- Progress bar (visible during sync) -->
+      <div id="progress-wrap" class="progress-wrap hidden">
+        <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+      </div>
+      <p id="progress-text" class="progress-text hidden"></p>
+
+      <button id="sync-btn" class="btn btn-primary">Sync Now</button>
+    </div>
+
+    <!-- LinkedIn session status -->
+    <div id="linkedin-warning" class="warning hidden">
+      ⚠️ Not signed in to LinkedIn — open LinkedIn in a tab to enable sync.
+    </div>
+
+    <div class="footer">
+      <label class="toggle-row">
+        <span>Notifications</span>
+        <input type="checkbox" id="notif-toggle" checked />
+      </label>
+      <a href="https://app.nexo.in" target="_blank" class="open-app">Open Nexo →</a>
+    </div>
+  </div>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
