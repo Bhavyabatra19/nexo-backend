@@ -10,6 +10,8 @@ const db = require('../db');
 const { messageParseQueue, enrichQueue, networkScanQueue } = require('../workers/queues');
 const { recomputeUserConfidence } = require('../services/confidence');
 const logger = require('../logger');
+const { fetchAllConnections } = require('../services/linkedin/voyagerConnections');
+const { processConnectionsBatch } = require('../services/linkedinScraper');
 
 /**
  * LinkedIn Import Routes — v2
@@ -544,6 +546,125 @@ router.post('/test-parse', authenticateToken, upload.single('file'), async (req,
       hint: 'Please ensure you\'re uploading a valid LinkedIn Connections export CSV'
     });
   }
+});
+
+/**
+ * POST /api/linkedin/fetch-connections
+ *
+ * Server-side LinkedIn network fetch using Voyager API (LinkedIn's internal API).
+ * User provides their session cookies — we paginate all connections and import them.
+ *
+ * How to get cookies (instruct user):
+ *   1. Open linkedin.com in Chrome (stay logged in)
+ *   2. DevTools → Application → Cookies → www.linkedin.com
+ *   3. Copy: li_at value  AND  JSESSIONID value
+ *
+ * Body: { li_at: string, jsessionid: string }
+ *
+ * Returns SSE stream so the client can show live progress:
+ *   data: {"type":"progress","fetched":100,"total":312}
+ *   data: {"type":"done","imported":312,"enrichmentQueued":312}
+ *   data: {"type":"error","message":"..."}
+ */
+router.post('/fetch-connections', authenticateToken, async (req, res) => {
+  const { li_at, jsessionid } = req.body;
+
+  if (!li_at || !jsessionid) {
+    return res.status(400).json({
+      success: false,
+      error: 'Both li_at and jsessionid cookie values are required.',
+      hint: 'Open LinkedIn in Chrome → F12 → Application → Cookies → www.linkedin.com',
+    });
+  }
+
+  if (li_at.length < 20 || jsessionid.length < 5) {
+    return res.status(400).json({
+      success: false,
+      error: 'Cookie values look invalid — please re-copy from browser DevTools.',
+    });
+  }
+
+  // Use SSE so the frontend can show a live progress bar
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  try {
+    send({ type: 'start', message: 'Connecting to LinkedIn...' });
+
+    const connections = await fetchAllConnections(
+      li_at,
+      jsessionid,
+      ({ fetched, total }) => {
+        send({ type: 'progress', fetched, total });
+      }
+    );
+
+    if (!connections.length) {
+      send({ type: 'error', message: 'No connections returned — cookies may be expired or invalid.' });
+      return res.end();
+    }
+
+    send({ type: 'importing', message: `Saving ${connections.length} contacts...` });
+
+    // Reuse the same batch processor as the Chrome extension
+    const result = await processConnectionsBatch(req.userId, connections);
+
+    // Queue enrichment for any new contacts without it yet
+    const { rows: toEnrich } = await db.query(`
+      SELECT id, linkedin_url FROM contacts
+      WHERE user_id = $1 AND linkedin_url IS NOT NULL AND enrichment_status = 'pending'
+    `, [req.userId]);
+
+    for (const c of toEnrich) {
+      await enrichQueue.add('enrich', {
+        contactId:   c.id,
+        linkedinUrl: c.linkedin_url,
+        userId:      req.userId,
+      }, { priority: 5, attempts: 3, backoff: { type: 'exponential', delay: 2000 } });
+    }
+
+    // Trigger network scan for group overlap detection
+    const { rows: userGroups } = await db.query(
+      `SELECT group_id FROM group_members WHERE user_id = $1 AND consent_given_at IS NOT NULL`,
+      [req.userId]
+    );
+    for (const g of userGroups) {
+      await networkScanQueue.add('scan', { userId: req.userId, groupId: g.group_id }, { priority: 3 });
+    }
+
+    // Recompute confidence for all
+    recomputeUserConfidence(req.userId).catch(() => {});
+
+    send({
+      type: 'done',
+      imported:          result.created + result.updated,
+      created:           result.created,
+      updated:           result.updated,
+      skipped:           result.skipped,
+      enrichmentQueued:  toEnrich.length,
+      message: `Imported ${result.created + result.updated} contacts. Enriching ${toEnrich.length} in background.`,
+    });
+
+    logger.info(`[Voyager] User ${req.userId}: imported ${result.created} new, ${result.updated} updated, ${toEnrich.length} queued for enrichment`);
+
+  } catch (err) {
+    logger.error(`[Voyager] fetch-connections failed for user ${req.userId}: ${err.message}`);
+
+    // Distinguish auth errors from other failures
+    if (err.response?.status === 401 || err.response?.status === 403) {
+      send({ type: 'error', message: 'LinkedIn session expired — please re-copy your cookies and try again.' });
+    } else if (err.response?.status === 429) {
+      send({ type: 'error', message: 'LinkedIn rate limited this request. Wait 10 minutes and try again.' });
+    } else {
+      send({ type: 'error', message: err.message });
+    }
+  }
+
+  res.end();
 });
 
 module.exports = router;
