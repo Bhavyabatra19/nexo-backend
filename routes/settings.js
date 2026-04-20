@@ -138,4 +138,21 @@ router.delete('/account', authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/settings/extension-token
+ * Returns a long-lived (90-day) JWT for the Chrome extension.
+ * User copies this once from nexo.in/settings → Extension Token.
+ */
+router.get('/extension-token', authenticateToken, (req, res) => {
+  const { generateToken } = require('../middleware/auth');
+  // Override expiry to 90 days for extension use
+  const jwt = require('jsonwebtoken');
+  const token = jwt.sign(
+    { userId: req.userId },
+    process.env.JWT_SECRET,
+    { expiresIn: '90d' }
+  );
+  res.json({ success: true, token, expiresIn: '90 days' });
+});
+
 module.exports = router;
