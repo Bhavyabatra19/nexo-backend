@@ -13,7 +13,7 @@
   ],
   "host_permissions": [
     "*://*.linkedin.com/*",
-    "https://api.nexo.in/*",
+    "https://187.127.129.125.nip.io/*",
     "http://localhost:3000/*"
   ],
 

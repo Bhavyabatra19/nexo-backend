@@ -41,7 +41,7 @@ document.getElementById('connect-btn').addEventListener('click', async () => {
 
   const stats = await validateToken(token);
   if (!stats) {
-    showError(errorEl, 'Token invalid or expired. Check nexo.in/settings.');
+    showError(errorEl, 'Token invalid or expired. Copy your token from the Nexo onboarding page.');
     btn.disabled = false;
     btn.textContent = 'Connect';
     return;
