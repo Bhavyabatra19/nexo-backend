@@ -669,6 +669,153 @@ router.post('/fetch-connections', authenticateToken, async (req, res) => {
 });
 
 /**
+ * POST /api/linkedin/import-by-url
+ *
+ * Import LinkedIn contacts directly from profile URLs using Bright Data.
+ * Accepts up to 100 LinkedIn /in/ URLs, creates stub contacts, enriches
+ * them via Bright Data, and streams SSE progress back to the client.
+ *
+ * Body: { urls: string[] }
+ *
+ * SSE events:
+ *   { type: 'start',    total: N }
+ *   { type: 'status',   message: string }
+ *   { type: 'progress', processed: N, total: N }
+ *   { type: 'done',     imported: N, enriched: N, errors: N }
+ *   { type: 'error',    message: string }
+ */
+router.post('/import-by-url', authenticateToken, async (req, res) => {
+  const { urls } = req.body;
+
+  if (!Array.isArray(urls) || !urls.length) {
+    return res.status(400).json({ success: false, error: 'urls array is required' });
+  }
+  if (urls.length > 100) {
+    return res.status(400).json({ success: false, error: 'Maximum 100 URLs per request' });
+  }
+
+  // Normalise and validate — must be linkedin.com/in/* URLs
+  const validUrls = urls
+    .map(u => String(u).trim().split('?')[0].replace(/\/$/, ''))
+    .filter(u => /^https?:\/\/(www\.)?linkedin\.com\/in\/[^/]+/.test(u));
+
+  if (!validUrls.length) {
+    return res.status(400).json({ success: false, error: 'No valid LinkedIn profile URLs found' });
+  }
+
+  // SSE setup
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  try {
+    send({ type: 'start', total: validUrls.length });
+
+    // Step 1: upsert stub contacts so we have IDs before enrichment
+    const contactMap = new Map(); // linkedin_url -> contactId
+    for (const url of validUrls) {
+      const slug    = url.replace(/.*\/in\//, '').replace(/[^a-zA-Z0-9_-]/g, '');
+      const { rows } = await db.query(
+        `INSERT INTO contacts
+           (user_id, full_name, linkedin_url, source, enrichment_status)
+         VALUES ($1, $2, $3, 'url_import', 'pending')
+         ON CONFLICT (user_id, linkedin_url)
+           DO UPDATE SET enrichment_status = 'pending'
+         RETURNING id`,
+        [req.userId, slug, url]
+      );
+      if (rows[0]) contactMap.set(url, rows[0].id);
+    }
+
+    send({
+      type: 'status',
+      message: `Fetching ${contactMap.size} profiles from LinkedIn via Bright Data…`,
+    });
+
+    // Step 2: batch-trigger Bright Data and poll until results are ready
+    const { enrichBatch } = require('../services/enrichment/brightdata');
+    const urlList  = [...contactMap.keys()];
+    const results  = await enrichBatch(urlList);
+
+    // Step 3: update contacts with enriched profile data
+    let enriched = 0;
+    let errors   = 0;
+
+    for (let i = 0; i < urlList.length; i++) {
+      const url       = urlList[i];
+      const contactId = contactMap.get(url);
+      const result    = results[i];
+
+      if (!result || !contactId) { errors++; continue; }
+
+      // Build first/last name from full_name if individual parts missing
+      let firstName = result.first_name || null;
+      let lastName  = result.last_name  || null;
+      if (!firstName && result.full_name) {
+        const parts = result.full_name.trim().split(/\s+/);
+        firstName   = parts[0] || null;
+        lastName    = parts.slice(1).join(' ') || null;
+      }
+
+      await db.query(`
+        UPDATE contacts SET
+          full_name           = COALESCE($1,  full_name),
+          first_name          = COALESCE($2,  first_name),
+          last_name           = COALESCE($3,  last_name),
+          job_title           = COALESCE($4,  job_title),
+          company             = COALESCE($5,  company),
+          bio                 = COALESCE($6,  bio),
+          skills              = COALESCE($7::jsonb,  skills),
+          experience          = COALESCE($8::jsonb,  experience),
+          education           = COALESCE($9::jsonb,  education),
+          photo_url           = COALESCE($10, photo_url),
+          enrichment_status   = 'enriched',
+          enrichment_provider = 'brightdata',
+          enriched_at         = NOW(),
+          pinecone_indexed    = false
+        WHERE id = $11
+      `, [
+        result.full_name || null,
+        firstName,
+        lastName,
+        result.occupation || null,
+        result.company    || null,
+        result.bio        || null,
+        result.skills?.length       ? JSON.stringify(result.skills)       : null,
+        result.experiences?.length  ? JSON.stringify(result.experiences)  : null,
+        result.education?.length    ? JSON.stringify(result.education)    : null,
+        result.profile_pic_url      || null,
+        contactId,
+      ]);
+
+      enriched++;
+      send({ type: 'progress', processed: enriched + errors, total: validUrls.length });
+    }
+
+    // Update group member flag and recompute confidence
+    if (enriched > 0) {
+      await db.query(
+        `UPDATE group_members SET linkedin_uploaded = true WHERE user_id = $1`,
+        [req.userId]
+      );
+      recomputeUserConfidence(req.userId).catch(() => {});
+    }
+
+    send({ type: 'done', imported: contactMap.size, enriched, errors });
+    logger.info(`[UrlImport] User ${req.userId}: ${enriched} enriched, ${errors} errors from ${validUrls.length} URLs`);
+
+  } catch (err) {
+    logger.error(`[UrlImport] User ${req.userId}: ${err.message}`);
+    send({ type: 'error', message: err.message });
+  }
+
+  res.end();
+});
+
+/**
  * POST /api/linkedin/bulk-enrich
  *
  * Queues Bright Data enrichment for all unenriched connections that

@@ -100,6 +100,9 @@ function normalizeProfile(raw) {
   }
 
   return {
+    full_name:       raw.name || raw.full_name || null,
+    first_name:      raw.first_name || null,
+    last_name:       raw.last_name  || null,
     bio:             raw.about || raw.summary || null,
     occupation:      raw.headline || raw.title || null,
     company:         extractCurrentCompany(raw),
