@@ -65,17 +65,54 @@ async function fetchAllConnections(liAt, jsessionId, onProgress = () => {}) {
   return allConnections;
 }
 
+const DECORATION_IDS = [
+  'com.linkedin.voyager.dash.deco.web.mynetwork.ConnectionListWithDistance-16',
+  'com.linkedin.voyager.dash.deco.web.mynetwork.ConnectionListWithDistance-14',
+];
+
 async function fetchPage(headers, start) {
-  const response = await axios.get(VOYAGER_CONNECTIONS_URL, {
-    params: {
-      decorationId: 'com.linkedin.voyager.dash.deco.web.mynetwork.ConnectionListWithDistance-14',
-      count: PAGE_SIZE,
-      q: 'viewer',
-      start,
-    },
-    headers,
-    timeout: 20000,
-  });
+  let lastErr;
+  for (const decorationId of DECORATION_IDS) {
+    try {
+      const response = await axios.get(VOYAGER_CONNECTIONS_URL, {
+        params: { decorationId, count: PAGE_SIZE, q: 'viewer', start, sortType: 'RECENTLY_ADDED' },
+        headers,
+        timeout: 20000,
+      });
+      return response.data;
+    } catch (err) {
+      lastErr = err;
+      const status = err.response?.status;
+      // Only retry with next decorationId on 400 (bad params) — anything else is a real error
+      if (status !== 400) {
+        const body = JSON.stringify(err.response?.data || {}).slice(0, 300);
+        logger.error(`[Voyager] fetchPage start=${start} → HTTP ${status}: ${body}`);
+        throw err;
+      }
+      logger.warn(`[Voyager] decorationId ${decorationId} returned 400, trying fallback`);
+    }
+  }
+  const status = lastErr?.response?.status;
+  const body = JSON.stringify(lastErr?.response?.data || {}).slice(0, 300);
+  logger.error(`[Voyager] fetchPage start=${start} → all decorationIds failed, last HTTP ${status}: ${body}`);
+  throw lastErr;
+}
+
+async function fetchPageV2(headers, start) {
+  // Alternative endpoint — try if primary returns 400
+  const response = await axios.get(
+    'https://www.linkedin.com/voyager/api/relationships/dash/connections',
+    {
+      params: {
+        decorationId: 'com.linkedin.voyager.dash.deco.web.mynetwork.ConnectionListWithDistance-16',
+        count: PAGE_SIZE,
+        q: 'viewer',
+        start,
+      },
+      headers,
+      timeout: 20000,
+    }
+  );
   return response.data;
 }
 
@@ -86,8 +123,8 @@ function buildHeaders(liAt, jsessionId, csrfToken) {
     'X-RestLi-Protocol-Version': '2.0.0',
     'X-Li-Lang': 'en_US',
     'X-Li-Track': JSON.stringify({
-      clientVersion: '1.13.2033',
-      mpVersion: '1.13.2033',
+      clientVersion: '1.13.31027',
+      mpVersion: '1.13.31027',
       osName: 'web',
       timezoneOffset: 5.5,
       timezone: 'Asia/Kolkata',
@@ -98,7 +135,7 @@ function buildHeaders(liAt, jsessionId, csrfToken) {
       displayHeight: 1080,
     }),
     'User-Agent':
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
     'Accept': 'application/vnd.linkedin.normalized+json+2.1',
     'Accept-Language': 'en-US,en;q=0.9',
     'Referer': 'https://www.linkedin.com/mynetwork/invite-connect/connections/',

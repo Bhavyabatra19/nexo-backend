@@ -74,8 +74,14 @@ const allowedOrigins = process.env.FRONTEND_URL
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests) or if the origin is in our allowed list
-    if (!origin || allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
+    // Allow: no origin (curl/mobile), allowed list, Chrome extensions
+    if (
+      !origin ||
+      allowedOrigins.includes(origin) ||
+      allowedOrigins.includes('*') ||
+      origin.startsWith('chrome-extension://') ||
+      origin.startsWith('moz-extension://')
+    ) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
@@ -85,6 +91,9 @@ const corsOptions = {
   optionsSuccessStatus: 200
 };
 app.use(cors(corsOptions));
+
+// Trust Nginx reverse proxy — required for express-rate-limit to work correctly
+app.set('trust proxy', 1);
 
 // Gzip/Brotli compression — reduces payload size by 60-80%
 app.use(compression());
@@ -151,6 +160,9 @@ app.use('/api/groups', groupsRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/intros', introsRoutes);
 app.use('/api/extension', extensionRoutes);
+
+// Serve extension zip for download
+app.use('/public', express.static(require('path').join(__dirname, 'public')));
 
 // Root endpoint with API documentation
 app.get('/', (req, res) => {
