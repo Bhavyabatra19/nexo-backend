@@ -25,7 +25,8 @@ const { enrichQueue } = require('../workers/queues');
 async function processExtensionProfile(userId, profileData) {
   const {
     linkedin_url, name, headline, company, location,
-    connection_degree, profile_pic, captured_at
+    connection_degree, profile_pic, captured_at,
+    bio, experience, education, skills,
   } = profileData;
 
   if (!linkedin_url || !name) return null;
@@ -45,27 +46,42 @@ async function processExtensionProfile(userId, profileData) {
     [userId, cleanUrl]
   );
 
+  const hasRichData = (experience?.length > 0) || (education?.length > 0);
+
   if (existing.length) {
     const contact = existing[0];
     const changes = detectProfileChanges(contact, { company, title: headline });
 
-    if (changes.length) {
+    // Always update rich data if the extension captured it (browsing a profile page)
+    if (changes.length || hasRichData) {
       await db.query(`
         UPDATE contacts SET
-          company  = COALESCE($1, company),
-          job_title = COALESCE($2, job_title),
-          photo_url = COALESCE($3, photo_url),
-          custom_fields = custom_fields || $4::jsonb,
+          company          = COALESCE($1, company),
+          job_title        = COALESCE($2, job_title),
+          photo_url        = COALESCE($3, photo_url),
+          bio              = COALESCE($4, bio),
+          experience       = CASE WHEN $5::jsonb IS NOT NULL THEN $5::jsonb ELSE experience END,
+          education        = CASE WHEN $6::jsonb IS NOT NULL THEN $6::jsonb ELSE education END,
+          skills           = CASE WHEN $7::jsonb IS NOT NULL THEN $7::jsonb ELSE skills END,
+          enrichment_status = CASE WHEN $5::jsonb IS NOT NULL THEN 'enriched' ELSE enrichment_status END,
+          enrichment_provider = CASE WHEN $5::jsonb IS NOT NULL THEN 'extension' ELSE enrichment_provider END,
+          enriched_at      = CASE WHEN $5::jsonb IS NOT NULL THEN NOW() ELSE enriched_at END,
+          custom_fields    = custom_fields || $8::jsonb,
           pinecone_indexed = false
-        WHERE id = $5
-      `, [company, headline, profile_pic,
-          JSON.stringify({ last_change_detected: new Date(), changes }),
-          contact.id]);
+        WHERE id = $9
+      `, [
+        company, headline, profile_pic,
+        bio || null,
+        experience?.length ? JSON.stringify(experience) : null,
+        education?.length  ? JSON.stringify(education)  : null,
+        skills?.length     ? JSON.stringify(skills)     : null,
+        JSON.stringify({ last_change_detected: new Date(), changes }),
+        contact.id,
+      ]);
 
-      logger.info(`[LinkedInScraper] Updated ${name}: ${changes.join(', ')}`);
+      if (changes.length) logger.info(`[LinkedInScraper] Updated ${name}: ${changes.join(', ')}`);
     }
 
-    // Update scrape log with contact_id
     await db.query(
       `UPDATE linkedin_scrape_log SET contact_id = $1, processed = true
        WHERE user_id = $2 AND linkedin_url = $3 AND processed = false`,
@@ -78,35 +94,53 @@ async function processExtensionProfile(userId, profileData) {
 
   // New contact from extension
   const names = splitName(name);
+
+  // If we have rich data from the DOM, mark as enriched immediately
+  const enrichmentStatus = hasRichData ? 'enriched' : 'queued';
+
   const { rows: inserted } = await db.query(`
     INSERT INTO contacts
       (user_id, full_name, first_name, last_name, job_title, company,
-       linkedin_url, photo_url, source, enrichment_status, pinecone_indexed)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'chrome_extension', 'queued', false)
+       linkedin_url, photo_url, bio, experience, education, skills,
+       source, enrichment_status, enrichment_provider, enriched_at, pinecone_indexed)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+            $10::jsonb, $11::jsonb, $12::jsonb,
+            'chrome_extension', $13,
+            CASE WHEN $13 = 'enriched' THEN 'extension' ELSE NULL END,
+            CASE WHEN $13 = 'enriched' THEN NOW() ELSE NULL END,
+            false)
     ON CONFLICT DO NOTHING
     RETURNING id
-  `, [userId, name, names.first, names.last, headline, company, cleanUrl, profile_pic]);
+  `, [
+    userId, name, names.first, names.last, headline, company, cleanUrl, profile_pic,
+    bio || null,
+    experience?.length ? JSON.stringify(experience) : '[]',
+    education?.length  ? JSON.stringify(education)  : '[]',
+    skills?.length     ? JSON.stringify(skills)     : '[]',
+    enrichmentStatus,
+  ]);
 
   if (!inserted.length) return null;
 
   const contactId = inserted[0].id;
 
-  // Update scrape log
   await db.query(
     `UPDATE linkedin_scrape_log SET contact_id = $1, processed = true
      WHERE user_id = $2 AND linkedin_url = $3 AND processed = false`,
     [contactId, userId, cleanUrl]
   );
 
-  // Queue enrichment
-  await enrichQueue.add('enrich', { contactId, linkedinUrl: cleanUrl, userId }, {
-    priority: 5,
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 2000 },
-  });
+  // Only queue enrichment if we didn't get rich data from the DOM
+  if (!hasRichData) {
+    await enrichQueue.add('enrich', { contactId, linkedinUrl: cleanUrl, userId }, {
+      priority: 5,
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 2000 },
+    });
+  }
 
   await recomputeConfidence(contactId);
-  return { action: 'created', contactId };
+  return { action: 'created', contactId, enrichedByExtension: hasRichData };
 }
 
 /**

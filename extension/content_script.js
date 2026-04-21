@@ -45,9 +45,162 @@
       profile_pic:       attr('img.pv-top-card-profile-picture__image', 'src') ||
                          attr('img.profile-photo-edit__preview', 'src'),
       connection_degree: extractConnectionDegree(),
+      bio:               extractBio(),
+      experience:        extractExperience(),
+      education:         extractEducation(),
+      skills:            extractSkills(),
       captured_at:       new Date().toISOString(),
     };
   }
+
+  // ── Bio / About ────────────────────────────────────────────────────────────
+
+  function extractBio() {
+    // "About" section — LinkedIn renders a collapsible span
+    const aboutSection = document.querySelector(
+      '#about ~ div .pv-shared-text-with-see-more span[aria-hidden="true"], ' +
+      'section.pv-about-section div.pv-about__summary-text, ' +
+      '.pv-about-section .lt-line-clamp__raw-line'
+    );
+    return aboutSection?.innerText?.trim() || null;
+  }
+
+  // ── Experience / Work History ──────────────────────────────────────────────
+
+  function extractExperience() {
+    // LinkedIn renders experience entries in a list under #experience
+    const section = findSection('experience');
+    if (!section) return [];
+
+    const entries = [];
+
+    // Each li under the experience section list
+    const listItems = section.querySelectorAll('li.artdeco-list__item');
+    for (const li of listItems) {
+      // Detect grouped roles at same company (nested list inside a group card)
+      const groupedRoles = li.querySelectorAll('.pvs-entity__sub-components li');
+      if (groupedRoles.length > 0) {
+        // Company name is the top-level heading of the group
+        const groupCompany = cleanText(li.querySelector('.mr1.t-bold span[aria-hidden="true"]'));
+        for (const role of groupedRoles) {
+          const entry = parseExperienceItem(role, groupCompany);
+          if (entry) entries.push(entry);
+        }
+      } else {
+        const entry = parseExperienceItem(li);
+        if (entry) entries.push(entry);
+      }
+    }
+
+    return entries;
+  }
+
+  function parseExperienceItem(li, overrideCompany = null) {
+    // Title is the first bold span
+    const titleEl = li.querySelector('.mr1.t-bold span[aria-hidden="true"], .t-14.t-bold span[aria-hidden="true"]');
+    const title = cleanText(titleEl);
+    if (!title) return null;
+
+    // Company name — second line or passed in from group
+    const companyEl = li.querySelector('.t-14.t-normal span[aria-hidden="true"]');
+    const rawCompany = cleanText(companyEl);
+    // Raw company often includes employment type: "Anthropic · Full-time"
+    const company = overrideCompany || rawCompany?.split('·')[0]?.trim() || null;
+
+    // Date range + duration — ".pvs-entity__caption-wrapper" or second .t-14.t-normal
+    const captionEls = li.querySelectorAll('.pvs-entity__caption-wrapper, .t-14.t-normal.t-black--light span[aria-hidden="true"]');
+    let dateRange = null, duration = null, location = null;
+
+    for (const el of captionEls) {
+      const t = cleanText(el);
+      if (!t) continue;
+      // Date ranges contain month/year patterns or "Present"
+      if (/\d{4}|Present/i.test(t) && !dateRange) {
+        // "Jan 2022 – Present · 2 yrs"  or  "2022 – 2024"
+        const parts = t.split(' · ');
+        dateRange = parts[0]?.trim() || null;
+        duration  = parts[1]?.trim() || null;
+      } else if (!location) {
+        location = t;
+      }
+    }
+
+    const { start, end, current } = parseDateRange(dateRange);
+
+    // Description — expanded text block
+    const descEl = li.querySelector('.pv-shared-text-with-see-more span[aria-hidden="true"], .pvs-list__item--with-top-padding span[aria-hidden="true"]');
+    const description = cleanText(descEl);
+
+    return { title, company, start, end, current, duration, location, description };
+  }
+
+  // ── Education ──────────────────────────────────────────────────────────────
+
+  function extractEducation() {
+    const section = findSection('education');
+    if (!section) return [];
+
+    const entries = [];
+    const listItems = section.querySelectorAll('li.artdeco-list__item');
+
+    for (const li of listItems) {
+      const school  = cleanText(li.querySelector('.mr1.t-bold span[aria-hidden="true"]'));
+      if (!school) continue;
+
+      const degreeEl  = li.querySelector('.t-14.t-normal span[aria-hidden="true"]');
+      const rawDegree = cleanText(degreeEl);
+
+      // "Bachelor of Science, Computer Science" or "B.S. · Computer Science"
+      let degree = null, field = null;
+      if (rawDegree) {
+        const parts = rawDegree.split(/[,·]/);
+        degree = parts[0]?.trim() || null;
+        field  = parts[1]?.trim() || null;
+      }
+
+      // Dates in caption
+      const captionEl = li.querySelector('.pvs-entity__caption-wrapper span[aria-hidden="true"], .t-14.t-normal.t-black--light span[aria-hidden="true"]');
+      const dateRange = cleanText(captionEl);
+      const { start, end } = parseDateRange(dateRange);
+
+      entries.push({ school, degree, field, start, end });
+    }
+
+    return entries;
+  }
+
+  // ── Skills ─────────────────────────────────────────────────────────────────
+
+  function extractSkills() {
+    const section = findSection('skills');
+    if (!section) return [];
+
+    const skills = [];
+    const listItems = section.querySelectorAll('li.artdeco-list__item');
+    for (const li of listItems) {
+      const name = cleanText(li.querySelector('.mr1.t-bold span[aria-hidden="true"], .t-16.t-bold span[aria-hidden="true"]'));
+      if (name) skills.push(name);
+      if (skills.length >= 30) break; // cap at 30 — the rest are rarely visible anyway
+    }
+
+    return skills;
+  }
+
+  // ── Section Finder ─────────────────────────────────────────────────────────
+
+  function findSection(id) {
+    // LinkedIn uses id="experience" etc. on the section or its heading
+    let section = document.querySelector(`#${id}`);
+    if (section) {
+      // Walk up to the closest section container
+      return section.closest('section') || section.parentElement;
+    }
+    // Fallback: aria-label
+    section = document.querySelector(`section[aria-label*="${id}" i]`);
+    return section || null;
+  }
+
+  // ── Company Extraction ─────────────────────────────────────────────────────
 
   function extractCurrentCompany() {
     // Try experience section first (most reliable)
@@ -55,7 +208,7 @@
       '#experience ~ div li:first-child .t-14.t-normal, ' +
       'section[id*="experience"] li:first-child .t-14.t-normal'
     );
-    if (expEntry) return expEntry.innerText?.trim();
+    if (expEntry) return expEntry.innerText?.trim()?.split('·')[0]?.trim();
 
     // Fall back to "Works at X" in about section
     const aboutCompany = document.querySelector('span[aria-label*="Current company"]');
@@ -74,11 +227,26 @@
   function extractConnectionDegree() {
     const degreeEl = document.querySelector('span.dist-value');
     if (!degreeEl) return null;
-    const text = degreeEl.innerText?.trim();
-    if (text === '1st') return 1;
-    if (text === '2nd') return 2;
-    if (text === '3rd') return 3;
+    const t = degreeEl.innerText?.trim();
+    if (t === '1st') return 1;
+    if (t === '2nd') return 2;
+    if (t === '3rd') return 3;
     return null;
+  }
+
+  // ── Date Range Parser ──────────────────────────────────────────────────────
+
+  function parseDateRange(raw) {
+    if (!raw) return { start: null, end: null, current: false };
+
+    // "Jan 2022 – Present", "2019 – 2023", "Mar 2020 – Dec 2021"
+    const parts = raw.split(/–|-/);
+    const start = parts[0]?.trim() || null;
+    const endRaw = parts[1]?.trim() || null;
+    const current = !endRaw || /present/i.test(endRaw);
+    const end = current ? null : endRaw;
+
+    return { start, end, current };
   }
 
   // ── Nexo Button Injection ──────────────────────────────────────────────────
@@ -185,6 +353,10 @@
 
   function attr(selector, attribute) {
     return document.querySelector(selector)?.getAttribute(attribute) || null;
+  }
+
+  function cleanText(el) {
+    return el?.innerText?.trim() || null;
   }
 
   function waitForElement(selector, callback, maxWait = 5000) {

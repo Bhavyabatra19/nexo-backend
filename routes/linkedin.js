@@ -12,6 +12,7 @@ const { recomputeUserConfidence } = require('../services/confidence');
 const logger = require('../logger');
 const { fetchAllConnections } = require('../services/linkedin/voyagerConnections');
 const { processConnectionsBatch } = require('../services/linkedinScraper');
+const { enrichBulkViaBrightData } = require('../services/enrichment/adapter');
 
 /**
  * LinkedIn Import Routes — v2
@@ -665,6 +666,74 @@ router.post('/fetch-connections', authenticateToken, async (req, res) => {
   }
 
   res.end();
+});
+
+/**
+ * POST /api/linkedin/bulk-enrich
+ *
+ * Queues Bright Data enrichment for all unenriched connections that
+ * have a LinkedIn URL. Kicks off immediately in background — client
+ * gets a count back right away.
+ *
+ * Optional body: { contactIds: [...] } to target specific contacts.
+ * Without it, enriches all pending contacts for the user.
+ */
+router.post('/bulk-enrich', authenticateToken, async (req, res) => {
+  const { contactIds } = req.body || {};
+
+  let query, params;
+  if (Array.isArray(contactIds) && contactIds.length) {
+    query = `
+      SELECT id, linkedin_url FROM contacts
+      WHERE user_id = $1
+        AND id = ANY($2::uuid[])
+        AND linkedin_url IS NOT NULL
+        AND enrichment_status IN ('pending', 'queued', 'failed')
+    `;
+    params = [req.userId, contactIds];
+  } else {
+    query = `
+      SELECT id, linkedin_url FROM contacts
+      WHERE user_id = $1
+        AND linkedin_url IS NOT NULL
+        AND enrichment_status IN ('pending', 'queued', 'failed')
+      LIMIT 500
+    `;
+    params = [req.userId];
+  }
+
+  const { rows } = await db.query(query, params);
+
+  if (!rows.length) {
+    return res.json({ success: true, queued: 0, message: 'No contacts need enrichment.' });
+  }
+
+  // Mark them all as 'enriching' immediately so we don't double-queue
+  const ids = rows.map(r => r.id);
+  await db.query(
+    `UPDATE contacts SET enrichment_status = 'enriching' WHERE id = ANY($1::uuid[])`,
+    [ids]
+  );
+
+  // Return immediately — enrichment runs in background
+  res.json({
+    success: true,
+    queued: rows.length,
+    message: `Bright Data enrichment started for ${rows.length} contacts.`,
+  });
+
+  // Run async — do not await
+  const items = rows.map(r => ({ contactId: r.id, linkedinUrl: r.linkedin_url }));
+  enrichBulkViaBrightData(items, req.userId).then(result => {
+    logger.info(`[BulkEnrich] User ${req.userId}: ${result.enriched} enriched, ${result.failed} failed`);
+  }).catch(err => {
+    logger.error(`[BulkEnrich] User ${req.userId}: ${err.message}`);
+    // Reset failed contacts back to 'failed' status
+    db.query(
+      `UPDATE contacts SET enrichment_status = 'failed' WHERE id = ANY($1::uuid[]) AND enrichment_status = 'enriching'`,
+      [ids]
+    ).catch(() => {});
+  });
 });
 
 module.exports = router;
