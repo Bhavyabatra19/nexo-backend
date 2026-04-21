@@ -21,10 +21,10 @@ const extensionRateLimit = rateLimit({
   message: { success: false, error: 'Extension rate limit exceeded' },
 });
 
-// Batch endpoint: max 2 batches per minute (batch = 50 contacts)
+// Batch endpoint: max 30 batches per minute (50 contacts each = 1500 contacts/min ceiling)
 const batchRateLimit = rateLimit({
   windowMs: 60 * 1000,
-  max: 2,
+  max: 30,
   keyGenerator: req => req.userId,
   message: { success: false, error: 'Batch rate limit: wait before next batch' },
 });
