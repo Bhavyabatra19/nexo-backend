@@ -118,7 +118,7 @@ async function fetchPageV2(headers, start) {
 
 function buildHeaders(liAt, jsessionId, csrfToken) {
   return {
-    'Cookie': `li_at=${liAt}; JSESSIONID="${csrfToken}"`,
+    'Cookie': `li_at=${liAt}; JSESSIONID=${csrfToken}`,
     'Csrf-Token': csrfToken,
     'X-RestLi-Protocol-Version': '2.0.0',
     'X-Li-Lang': 'en_US',
