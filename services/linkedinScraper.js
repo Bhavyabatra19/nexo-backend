@@ -130,12 +130,14 @@ async function processExtensionProfile(userId, profileData) {
     [contactId, userId, cleanUrl]
   );
 
-  // Only queue enrichment if we didn't get rich data from the DOM
+  // Only queue enrichment if we didn't get rich data from the DOM.
+  // jobId = contactId ensures the same contact is never double-queued.
   if (!hasRichData) {
     await enrichQueue.add('enrich', { contactId, linkedinUrl: cleanUrl, userId }, {
+      jobId:    `enrich:${contactId}`,
       priority: 5,
       attempts: 3,
-      backoff: { type: 'exponential', delay: 2000 },
+      backoff:  { type: 'exponential', delay: 2000 },
     });
   }
 

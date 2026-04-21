@@ -163,6 +163,14 @@ async function handleWeeklyDigest({ groupId }) {
 [enrichmentWorker, embeddingWorker, messageWorker, networkWorker, notificationWorker].forEach(w => {
   w.on('failed', (job, err) => {
     logger.error(`[Worker] Job ${job?.id} in ${w.name} failed: ${err.message}`);
+
+    // Reset enriching contacts to 'failed' so they don't get permanently stuck
+    if (w.name === 'enrichment' && job?.data?.contactId) {
+      db.query(
+        `UPDATE contacts SET enrichment_status = 'failed' WHERE id = $1 AND enrichment_status = 'enriching'`,
+        [job.data.contactId]
+      ).catch(dbErr => logger.error(`[Worker] Failed to reset enrichment status: ${dbErr.message}`));
+    }
   });
 });
 
