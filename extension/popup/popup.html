@@ -38,16 +38,8 @@
       <button id="disconnect-btn" class="btn-ghost">Disconnect</button>
     </div>
 
-    <!-- Sync status card -->
-    <div class="card" id="sync-card">
-      <div class="sync-row">
-        <div>
-          <p class="card-label">LinkedIn Sync</p>
-          <p id="sync-status-text" class="sync-status">Checking…</p>
-        </div>
-        <div id="sync-icon" class="sync-icon">⏳</div>
-      </div>
-
+    <!-- Stats row -->
+    <div class="card">
       <div class="stat-row">
         <div class="stat">
           <span id="stat-contacts" class="stat-value">—</span>
@@ -62,19 +54,35 @@
           <span class="stat-label">Last sync</span>
         </div>
       </div>
+    </div>
 
-      <!-- Progress bar (visible during sync) -->
-      <div id="progress-wrap" class="progress-wrap hidden">
-        <div id="progress-bar" class="progress-bar" style="width: 0%"></div>
+    <!-- Connections Page Scan — primary path -->
+    <div id="scan-card" class="card">
+      <div class="sync-row">
+        <div>
+          <p class="card-label">Connections Capture</p>
+          <p id="scan-status-text" class="sync-status">Go to your connections page and scroll</p>
+        </div>
+        <div id="scan-icon" class="sync-icon">📋</div>
       </div>
-      <p id="progress-text" class="progress-text hidden"></p>
-
-      <button id="sync-btn" class="btn btn-primary">Sync Now</button>
+      <div class="stat-row" style="margin-top:8px">
+        <div class="stat">
+          <span id="scan-captured" class="stat-value">0</span>
+          <span class="stat-label">Captured</span>
+        </div>
+        <div class="stat">
+          <span id="scan-synced" class="stat-value">0</span>
+          <span class="stat-label">Saved</span>
+        </div>
+      </div>
+      <a href="https://www.linkedin.com/mynetwork/invite-connect/connections/" target="_blank" class="btn btn-primary" style="text-align:center;text-decoration:none;display:block;margin-top:10px">
+        Open Connections Page →
+      </a>
     </div>
 
     <!-- LinkedIn session status -->
     <div id="linkedin-warning" class="warning hidden">
-      ⚠️ Not signed in to LinkedIn — open LinkedIn in a tab to enable sync.
+      ⚠️ Not signed in to LinkedIn — open LinkedIn in a tab first.
     </div>
 
     <div class="footer">

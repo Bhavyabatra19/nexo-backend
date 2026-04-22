@@ -49,7 +49,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleProfileCapture(message.data, sender.tab?.id)
       .then(result => sendResponse({ success: true, result }))
       .catch(err  => sendResponse({ success: false, error: err.message }));
-    return true; // keep channel open for async response
+    return true;
+  }
+
+  if (message.type === 'CONNECTIONS_BATCH') {
+    handleConnectionsBatch(message.data, message.total)
+      .then(result => sendResponse({ success: true, result }))
+      .catch(err   => sendResponse({ success: false, error: err.message }));
+    return true;
   }
 
   if (message.type === 'SYNC_NOW') {
@@ -61,6 +68,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'GET_SYNC_STATE') {
     getSyncState().then(sendResponse);
+    return true;
+  }
+
+  if (message.type === 'GET_SCAN_STATE') {
+    getScanState().then(sendResponse);
     return true;
   }
 });
@@ -75,7 +87,7 @@ async function runLinkedInSync({ source }) {
   }
 
   const cookies = await getLinkedInCookies();
-  if (!cookies.liAt) {
+  if (!cookies.liAt || !cookies.jsessionId) {
     console.log('[Nexo] Sync skipped: no LinkedIn session found — user must be logged in to LinkedIn');
     await notifyUser(
       'Nexo: LinkedIn sign-in needed',
@@ -195,6 +207,40 @@ async function handleProfileCapture(profileData, tabId) {
   return response.json();
 }
 
+// ── Connections Batch (from content_script connections page capture) ───────────
+
+async function handleConnectionsBatch(connections, totalCaptured) {
+  if (!(await isAuthenticated())) return null;
+
+  const apiBase = await getApiBase();
+  const token   = await getToken();
+
+  const response = await fetch(`${apiBase}/api/extension/batch`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify({ connections }),
+  });
+
+  if (!response.ok) throw new Error(`Batch upload failed: ${response.status}`);
+  const result = await response.json();
+
+  // Update scan state and badge so popup stays in sync
+  const current = await getScanState();
+  const newState = {
+    status:    'scanning',
+    captured:  totalCaptured ?? (current.captured || 0) + connections.length,
+    synced:    (current.synced || 0) + (result.result?.created || 0) + (result.result?.updated || 0),
+    lastBatch: Date.now(),
+  };
+  await setScanState(newState);
+  await setBadge(`${newState.captured}`, '#6366f1');
+
+  return result;
+}
+
 // ── LinkedIn Cookie Helpers ───────────────────────────────────────────────────
 
 async function getLinkedInCookies() {
@@ -213,13 +259,23 @@ async function getLinkedInCookies() {
 async function setSyncState(state) {
   const current = await getSyncState();
   await chrome.storage.local.set({ syncState: { ...current, ...state } });
-  // Relay to popup if open
   chrome.runtime.sendMessage({ type: 'SYNC_STATE_UPDATE', state: { ...current, ...state } }).catch(() => {});
 }
 
 async function getSyncState() {
   const { syncState } = await chrome.storage.local.get('syncState');
   return syncState || { status: 'idle' };
+}
+
+async function setScanState(state) {
+  const current = await getScanState();
+  await chrome.storage.local.set({ scanState: { ...current, ...state } });
+  chrome.runtime.sendMessage({ type: 'SCAN_STATE_UPDATE', state: { ...current, ...state } }).catch(() => {});
+}
+
+async function getScanState() {
+  const { scanState } = await chrome.storage.local.get('scanState');
+  return scanState || { status: 'idle', captured: 0, synced: 0 };
 }
 
 async function setBadge(text, color) {
