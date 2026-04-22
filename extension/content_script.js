@@ -11,17 +11,18 @@
  */
 
 (function () {
-  if (window.__nexoInjected) return;
-  window.__nexoInjected = true;
+  console.log('[Nexo] content script loaded on', window.location.pathname);
 
   const isProfilePage     = () => window.location.pathname.startsWith('/in/');
   const isConnectionsPage = () => window.location.pathname.includes('/mynetwork/invite-connect/connections');
 
   if (isProfilePage()) {
+    // Mount the widget immediately — don't gate on h1 since the widget renders
+    // its own "loading / sign in" states before any profile scraping runs.
+    mountWidget();
     waitForElement('h1', () => {
       captureCurrentProfile();
       injectNexoButton();
-      mountWidget();
     });
   }
 
@@ -894,10 +895,10 @@
     unmountWidget();
 
     if (isProfilePage()) {
+      mountWidget();
       waitForElement('h1', () => {
         captureCurrentProfile();
         if (!document.getElementById('nexo-save-btn')) injectNexoButton();
-        mountWidget();
       });
     }
 
