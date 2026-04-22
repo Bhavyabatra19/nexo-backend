@@ -14,32 +14,16 @@ const SYNC_INTERVAL  = 60 * 24 * 3; // 3 days in minutes
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────────
 
+// Legacy Voyager-cookie sync is deprecated in favor of DOM-scroll capture on the
+// connections page and the in-page widget. Cancel any stale alarm so it doesn't
+// keep firing failing /fetch-connections calls.
 chrome.runtime.onInstalled.addListener(async () => {
-  await scheduleSyncAlarm();
-  console.log('[Nexo] Extension installed. Sync alarm set for every 3 days.');
+  await chrome.alarms.clear(SYNC_ALARM);
+  console.log('[Nexo] Extension installed.');
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  // Re-register alarm in case it was cleared (browsers clear alarms on update)
-  await scheduleSyncAlarm();
-});
-
-async function scheduleSyncAlarm() {
-  const existing = await chrome.alarms.get(SYNC_ALARM);
-  if (!existing) {
-    chrome.alarms.create(SYNC_ALARM, {
-      delayInMinutes: 1,           // first sync 1 min after install
-      periodInMinutes: SYNC_INTERVAL,
-    });
-  }
-}
-
-// ── Alarm Handler ──────────────────────────────────────────────────────────────
-
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name !== SYNC_ALARM) return;
-  console.log('[Nexo] 3-day sync alarm fired');
-  await runLinkedInSync({ source: 'alarm' });
+  await chrome.alarms.clear(SYNC_ALARM);
 });
 
 // ── Message Handler (from content_script) ─────────────────────────────────────
