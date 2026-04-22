@@ -722,7 +722,7 @@ router.post('/import-by-url', authenticateToken, async (req, res) => {
         `INSERT INTO contacts
            (user_id, full_name, linkedin_url, source, enrichment_status)
          VALUES ($1, $2, $3, 'url_import', 'pending')
-         ON CONFLICT (user_id, linkedin_url)
+         ON CONFLICT (user_id, linkedin_url) WHERE linkedin_url IS NOT NULL
            DO UPDATE SET enrichment_status = 'pending'
          RETURNING id`,
         [req.userId, slug, url]

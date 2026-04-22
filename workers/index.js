@@ -159,12 +159,88 @@ async function handleWeeklyDigest({ groupId }) {
   await notificationService.sendEmail(group[0].admin_email, `Weekly digest: ${group[0].name}`, body);
 }
 
+// ─── Profile Monitor Worker ────────────────────────────────────────────────
+const FREQUENCY_INTERVALS = {
+  daily:   24 * 60 * 60 * 1000,
+  weekly:  7  * 24 * 60 * 60 * 1000,
+  monthly: 30 * 24 * 60 * 60 * 1000,
+};
+
+const profileMonitorWorker = new Worker('profile-monitor', async (job) => {
+  const { monitorId, contactId, linkedinUrl, userId } = job.data;
+  logger.info(`[Worker:Monitor] Checking ${linkedinUrl}`);
+
+  const { rows: [contact] } = await db.query(
+    `SELECT job_title, company, bio, experience, education, skills FROM contacts WHERE id = $1`,
+    [contactId]
+  );
+
+  if (!contact) {
+    await db.query(`UPDATE profile_monitors SET is_active = false WHERE id = $1`, [monitorId]);
+    return;
+  }
+
+  const oldSnapshot = {
+    job_title: contact.job_title,
+    company:   contact.company,
+    bio:       contact.bio,
+  };
+
+  await enrichContact(contactId, linkedinUrl, userId);
+
+  const { rows: [updated] } = await db.query(
+    `SELECT job_title, company, bio FROM contacts WHERE id = $1`,
+    [contactId]
+  );
+
+  const changedFields = {};
+  for (const field of ['job_title', 'company', 'bio']) {
+    if (updated[field] && updated[field] !== oldSnapshot[field]) {
+      changedFields[field] = { old: oldSnapshot[field], new: updated[field] };
+    }
+  }
+
+  if (Object.keys(changedFields).length > 0) {
+    await db.query(
+      `INSERT INTO profile_changes (user_id, contact_id, changed_fields) VALUES ($1, $2, $3)`,
+      [userId, contactId, JSON.stringify(changedFields)]
+    );
+
+    await db.query(
+      `UPDATE profile_monitors SET changes_detected = changes_detected + 1 WHERE id = $1`,
+      [monitorId]
+    );
+
+    const changeDesc = Object.entries(changedFields)
+      .map(([f, v]) => `${f}: "${v.old}" → "${v.new}"`)
+      .join(', ');
+
+    await db.query(
+      `INSERT INTO activities (user_id, contact_id, type, description)
+       VALUES ($1, $2, 'contact_updated', $3)
+       ON CONFLICT DO NOTHING`,
+      [userId, contactId, `LinkedIn profile updated: ${changeDesc}`]
+    );
+
+    logger.info(`[Worker:Monitor] Changes for ${linkedinUrl}: ${changeDesc}`);
+  }
+
+  // Schedule next check
+  const { rows: [monitor] } = await db.query(
+    `SELECT frequency FROM profile_monitors WHERE id = $1`, [monitorId]
+  );
+  const interval = FREQUENCY_INTERVALS[monitor?.frequency] || FREQUENCY_INTERVALS.weekly;
+  await db.query(
+    `UPDATE profile_monitors SET last_checked_at = NOW(), next_check_at = $1 WHERE id = $2`,
+    [new Date(Date.now() + interval), monitorId]
+  );
+}, { connection: conn, concurrency: 5 });
+
 // Error handlers
-[enrichmentWorker, embeddingWorker, messageWorker, networkWorker, notificationWorker].forEach(w => {
+[enrichmentWorker, embeddingWorker, messageWorker, networkWorker, notificationWorker, profileMonitorWorker].forEach(w => {
   w.on('failed', (job, err) => {
     logger.error(`[Worker] Job ${job?.id} in ${w.name} failed: ${err.message}`);
 
-    // Reset enriching contacts to 'failed' so they don't get permanently stuck
     if (w.name === 'enrichment' && job?.data?.contactId) {
       db.query(
         `UPDATE contacts SET enrichment_status = 'failed' WHERE id = $1 AND enrichment_status = 'enriching'`,
@@ -174,6 +250,6 @@ async function handleWeeklyDigest({ groupId }) {
   });
 });
 
-logger.info('Workers running: enrichment, embedding, message-parse, network-scan, notifications');
+logger.info('Workers running: enrichment, embedding, message-parse, network-scan, notifications, profile-monitor');
 
-module.exports = { enrichmentWorker, embeddingWorker, messageWorker, networkWorker, notificationWorker };
+module.exports = { enrichmentWorker, embeddingWorker, messageWorker, networkWorker, notificationWorker, profileMonitorWorker };

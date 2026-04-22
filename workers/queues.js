@@ -71,11 +71,21 @@ const notificationQueue = new Queue('notifications', {
   },
 });
 
+const profileMonitorQueue = new Queue('profile-monitor', {
+  connection: getRedisConnection(),
+  defaultJobOptions: {
+    ...defaultJobOptions,
+    attempts: 2,
+    backoff: { type: 'fixed', delay: 10000 },
+  },
+});
+
 module.exports = {
   enrichQueue,
   embedQueue,
   messageParseQueue,
   networkScanQueue,
   notificationQueue,
+  profileMonitorQueue,
   getRedisConnection,
 };
