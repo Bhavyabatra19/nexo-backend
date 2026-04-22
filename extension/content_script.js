@@ -631,7 +631,8 @@
 
     const host = document.createElement('div');
     host.id = WIDGET_HOST_ID;
-    host.style.cssText = 'position:fixed;top:88px;right:16px;z-index:99998;all:initial;';
+    // Reset first (guards against LinkedIn styling the host), then apply layout.
+    host.style.cssText = 'all:initial;position:fixed;top:88px;right:16px;z-index:2147483647;';
     document.body.appendChild(host);
 
     const root = host.attachShadow({ mode: 'open' });
