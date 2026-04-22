@@ -17,14 +17,9 @@
     <p class="tagline">Your network, organized.</p>
 
     <div class="card">
-      <p class="card-label">Paste your Nexo API token</p>
-      <input id="token-input" type="password" placeholder="ey..." autocomplete="off" />
-      <p class="hint">
-        Get your token from
-        <a href="https://app.nexo.in/settings/extensions" target="_blank">nexo.in → Settings → Extension Token</a>
-      </p>
-      <button id="connect-btn" class="btn btn-primary">Connect</button>
-      <p id="auth-error" class="error hidden"></p>
+      <p class="card-label">Connect to Nexo</p>
+      <p class="hint">Sign in to Nexo in your browser and come back — we'll pick up your session automatically.</p>
+      <button id="signin-btn" class="btn btn-primary">Sign in to Nexo →</button>
     </div>
   </div>
 
@@ -35,7 +30,7 @@
         <img src="../icons/icon48.png" class="logo-sm" alt="Nexo" />
         <span class="logo-name">Nexo</span>
       </div>
-      <button id="disconnect-btn" class="btn-ghost">Disconnect</button>
+      <button id="signout-btn" class="btn-ghost">Sign out</button>
     </div>
 
     <!-- Stats row -->
@@ -90,7 +85,7 @@
         <span>Notifications</span>
         <input type="checkbox" id="notif-toggle" checked />
       </label>
-      <a href="https://app.nexo.in" target="_blank" class="open-app">Open Nexo →</a>
+      <a href="https://nexo-frontend-indol.vercel.app" target="_blank" class="open-app">Open Nexo →</a>
     </div>
   </div>
 

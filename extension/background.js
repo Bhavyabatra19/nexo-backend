@@ -7,7 +7,7 @@
  * 3. Badge management (syncing / done / error states)
  */
 
-import { getApiBase, getToken, isAuthenticated } from './utils/auth.js';
+import { authedFetch, isAuthenticated } from './utils/auth.js';
 
 const SYNC_ALARM     = 'nexo-linkedin-sync';
 const SYNC_INTERVAL  = 60 * 24 * 3; // 3 days in minutes
@@ -125,17 +125,10 @@ async function runLinkedInSync({ source }) {
 }
 
 async function postSyncRequest(cookies) {
-  const apiBase = await getApiBase();
-  const token   = await getToken();
-
-  // Send cookies to Nexo backend which runs the Voyager pagination
-  // We intentionally do NOT store cookies on backend — used in transit only
-  const response = await fetch(`${apiBase}/api/linkedin/fetch-connections`, {
+  // Auth travels via the accessToken cookie (credentials: 'include').
+  const response = await authedFetch(`/api/linkedin/fetch-connections`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       li_at:     cookies.liAt,
       jsessionid: cookies.jsessionId,
@@ -191,15 +184,9 @@ async function parseSSEStream(bodyStream) {
 async function handleProfileCapture(profileData, tabId) {
   if (!(await isAuthenticated())) return null;
 
-  const apiBase = await getApiBase();
-  const token   = await getToken();
-
-  const response = await fetch(`${apiBase}/api/extension/profile`, {
+  const response = await authedFetch(`/api/extension/profile`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(profileData),
   });
 
@@ -212,15 +199,9 @@ async function handleProfileCapture(profileData, tabId) {
 async function handleConnectionsBatch(connections, totalCaptured) {
   if (!(await isAuthenticated())) return null;
 
-  const apiBase = await getApiBase();
-  const token   = await getToken();
-
-  const response = await fetch(`${apiBase}/api/extension/batch`, {
+  const response = await authedFetch(`/api/extension/batch`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ connections }),
   });
 

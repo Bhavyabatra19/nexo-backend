@@ -32,9 +32,11 @@ function invalidateUserCache(userId) {
  */
 async function authenticateToken(req, res, next) {
   try {
-    // Get token from header
+    // Cookie first (folkX-style: extension + web app share session), then Bearer fallback for legacy clients
+    const cookieToken = req.cookies?.accessToken;
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    const headerToken = authHeader && authHeader.split(' ')[1];
+    const token = cookieToken || headerToken;
 
     if (!token) {
       return res.status(401).json({
@@ -102,8 +104,10 @@ async function authenticateToken(req, res, next) {
  */
 async function optionalAuth(req, res, next) {
   try {
+    const cookieToken = req.cookies?.accessToken;
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const headerToken = authHeader && authHeader.split(' ')[1];
+    const token = cookieToken || headerToken;
 
     if (token) {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -145,10 +149,34 @@ function generateRefreshToken(userId) {
   );
 }
 
+// Cross-site (frontend on Vercel, extension chrome-extension://) cookies require SameSite=None + Secure.
+// In non-HTTPS local dev, fall back to Lax so cookies still work on localhost.
+const isProd = process.env.NODE_ENV === 'production';
+const cookieBase = {
+  httpOnly: true,
+  secure: isProd,
+  sameSite: isProd ? 'none' : 'lax',
+  path: '/',
+};
+
+function setAuthCookies(res, accessToken, refreshToken) {
+  res.cookie('accessToken', accessToken, { ...cookieBase, maxAge: 7 * 24 * 60 * 60 * 1000 });
+  if (refreshToken) {
+    res.cookie('refreshToken', refreshToken, { ...cookieBase, maxAge: 30 * 24 * 60 * 60 * 1000 });
+  }
+}
+
+function clearAuthCookies(res) {
+  res.clearCookie('accessToken', cookieBase);
+  res.clearCookie('refreshToken', cookieBase);
+}
+
 module.exports = {
   authenticateToken,
   optionalAuth,
   generateToken,
   generateRefreshToken,
-  invalidateUserCache
+  invalidateUserCache,
+  setAuthCookies,
+  clearAuthCookies,
 };

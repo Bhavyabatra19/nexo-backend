@@ -6,7 +6,12 @@ const {
   getTokensFromCode,
   getAuthenticatedClient
 } = require('../config/oauth');
-const { generateToken, generateRefreshToken } = require('../middleware/auth');
+const {
+  generateToken,
+  generateRefreshToken,
+  setAuthCookies,
+  clearAuthCookies,
+} = require('../middleware/auth');
 const UserModel = require('../models/User');
 const TokenModel = require('../models/Token');
 
@@ -66,37 +71,21 @@ router.get('/google/callback', async (req, res) => {
     const oauth2 = google.oauth2({ version: 'v2', auth: authClient });
     const { data: userInfo } = await oauth2.userinfo.get();
 
-    // Find or create user in database
-    const user = await UserModel.findOrCreate({
+    const { user, isNew } = await UserModel.findOrCreate({
       email: userInfo.email,
       fullName: userInfo.name,
       googleId: userInfo.id,
       profilePicture: userInfo.picture
     });
 
-    // Save Google tokens to database
     await TokenModel.upsert(user.id, tokens);
 
-    // Generate JWT tokens for our app
     const accessToken = generateToken(user.id);
     const refreshToken = generateRefreshToken(user.id);
-    res.redirect(process.env.FRONTEND_AUTH_URL+"/auth/callback?accessToken="+accessToken+"&refreshToken="+refreshToken);
-    // // Send response
-    // res.json({
-    //   success: true,
-    //   message: 'Authentication successful',
-    //   user: {
-    //     id: user.id,
-    //     email: user.email,
-    //     fullName: user.full_name,
-    //     profilePicture: user.profile_picture
-    //   },
-    //   tokens: {
-    //     accessToken,
-    //     refreshToken,
-    //     expiresIn: '7d'
-    //   }
-    // });
+    setAuthCookies(res, accessToken, refreshToken);
+
+    const qs = isNew ? '?new=1' : '';
+    res.redirect(`${process.env.FRONTEND_AUTH_URL}/auth/callback${qs}`);
 
   } catch (error) {
     console.error('OAuth callback error:', error);
@@ -113,7 +102,8 @@ router.get('/google/callback', async (req, res) => {
  */
 router.post('/refresh', async (req, res) => {
   try {
-    const { refreshToken } = req.body;
+    // Prefer cookie (primary path). Body fallback keeps legacy clients working.
+    const refreshToken = req.cookies?.refreshToken || req.body?.refreshToken;
 
     if (!refreshToken) {
       return res.status(400).json({
@@ -122,7 +112,6 @@ router.post('/refresh', async (req, res) => {
       });
     }
 
-    // Verify refresh token
     const jwt = require('jsonwebtoken');
     const decoded = jwt.verify(refreshToken, process.env.JWT_SECRET);
 
@@ -133,8 +122,8 @@ router.post('/refresh', async (req, res) => {
       });
     }
 
-    // Generate new access token
     const newAccessToken = generateToken(decoded.userId);
+    setAuthCookies(res, newAccessToken, null);
 
     res.json({
       success: true,
@@ -183,22 +172,13 @@ router.get('/me', require('../middleware/auth').authenticateToken, async (req, r
  * POST /api/auth/logout
  * Logout user (optional - just delete tokens on client)
  */
-router.post('/logout', require('../middleware/auth').authenticateToken, async (req, res) => {
-  try {
-    // Optionally: Could delete Google tokens from database
-    // await TokenModel.delete(req.userId);
-
-    res.json({
-      success: true,
-      message: 'Logged out successfully'
-    });
-
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
+router.post('/logout', async (req, res) => {
+  // Unauthenticated: always succeed — cookie-wipe should work even if the token is already expired.
+  clearAuthCookies(res);
+  res.json({
+    success: true,
+    message: 'Logged out successfully'
+  });
 });
 
 /**

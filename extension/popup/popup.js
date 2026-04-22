@@ -1,4 +1,4 @@
-import { getToken, setToken, clearToken, validateToken } from '../utils/auth.js';
+import { hasSessionCookie, fetchStatus, onSessionCookieChange, FRONTEND_URL } from '../utils/auth.js';
 
 // ── View management ───────────────────────────────────────────────────────────
 
@@ -10,12 +10,14 @@ function show(viewId) {
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 async function init() {
-  const token = await getToken();
-  if (!token) { show('view-auth'); return; }
+  if (!(await hasSessionCookie())) {
+    show('view-auth');
+    return;
+  }
 
-  const stats = await validateToken(token);
+  const stats = await fetchStatus();
   if (!stats) {
-    await clearToken();
+    // Cookie exists but server rejected (expired / revoked) — prompt re-auth.
     show('view-auth');
     return;
   }
@@ -26,33 +28,14 @@ async function init() {
 
 // ── Auth view ─────────────────────────────────────────────────────────────────
 
-document.getElementById('connect-btn').addEventListener('click', async () => {
-  const input   = document.getElementById('token-input');
-  const errorEl = document.getElementById('auth-error');
-  const btn     = document.getElementById('connect-btn');
-
-  const token = input.value.trim();
-  if (!token) { showError(errorEl, 'Paste your token first.'); return; }
-
-  btn.disabled = true;
-  btn.textContent = 'Connecting…';
-  errorEl.classList.add('hidden');
-
-  const stats = await validateToken(token);
-  if (!stats) {
-    showError(errorEl, 'Token invalid or expired. Check nexo.in/settings.');
-    btn.disabled = false;
-    btn.textContent = 'Connect';
-    return;
-  }
-
-  await setToken(token);
-  show('view-main');
-  await renderMainView(stats);
+document.getElementById('signin-btn').addEventListener('click', () => {
+  chrome.tabs.create({ url: FRONTEND_URL });
 });
 
-document.getElementById('token-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') document.getElementById('connect-btn').click();
+// When the user completes sign-in in another tab, the backend sets our cookie.
+// Flip the popup to the main view the moment we see it appear.
+onSessionCookieChange(async (present) => {
+  if (present) init();
 });
 
 // ── Main view ─────────────────────────────────────────────────────────────────
@@ -113,9 +96,9 @@ chrome.runtime.onMessage.addListener((message) => {
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 
-document.getElementById('disconnect-btn').addEventListener('click', async () => {
-  await clearToken();
-  show('view-auth');
+document.getElementById('signout-btn').addEventListener('click', async () => {
+  // Let the user sign out via the web app so the cookie is cleared server-side.
+  chrome.tabs.create({ url: `${FRONTEND_URL}/` });
 });
 
 document.getElementById('notif-toggle').addEventListener('change', async (e) => {
@@ -141,11 +124,6 @@ function formatRelativeTime(ts) {
   if (mins < 60) return `${mins}m ago`;
   if (hrs < 24)  return `${hrs}h ago`;
   return `${days}d ago`;
-}
-
-function showError(el, msg) {
-  el.textContent = msg;
-  el.classList.remove('hidden');
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────

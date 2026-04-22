@@ -51,26 +51,23 @@ class UserModel {
    * Find or create user (used during OAuth)
    */
   static async findOrCreate({ email, fullName, googleId, profilePicture }) {
-    // Try to find existing user
     let user = await this.findByGoogleId(googleId);
-    
+    let isNew = false;
+
     if (!user) {
-      // Check if email exists (user might have signed up differently)
       user = await this.findByEmail(email);
-      
+
       if (user) {
-        // Update with Google ID
         user = await this.update(user.id, { googleId, profilePicture });
       } else {
-        // Create new user
         user = await this.create({ email, fullName, googleId, profilePicture });
+        isNew = true;
       }
     }
-    
-    // Update last login
+
     await this.updateLastLogin(user.id);
-    
-    return user;
+
+    return { user, isNew };
   }
 
   /**
