@@ -13,6 +13,17 @@
 (function () {
   console.log('[Nexo] content script loaded on', window.location.pathname);
 
+  // Visual breadcrumb so we can tell at a glance whether the content script ran.
+  // Auto-hides after 4s; clicking it removes it immediately.
+  try {
+    const b = document.createElement('div');
+    b.textContent = 'Nexo loaded';
+    b.style.cssText = 'all:initial;position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#6366f1;color:#fff;font:600 12px/1 system-ui;padding:6px 12px;border-radius:999px;box-shadow:0 2px 8px rgba(0,0,0,.25);cursor:pointer;';
+    b.addEventListener('click', () => b.remove());
+    (document.body || document.documentElement).appendChild(b);
+    setTimeout(() => b.remove(), 4000);
+  } catch {}
+
   const isProfilePage     = () => window.location.pathname.startsWith('/in/');
   const isConnectionsPage = () => window.location.pathname.includes('/mynetwork/invite-connect/connections');
 
