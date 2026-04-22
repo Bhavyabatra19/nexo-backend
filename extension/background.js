@@ -75,6 +75,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     getScanState().then(sendResponse);
     return true;
   }
+
+  // Authed fetch proxy for content-script widgets.
+  // The content script's fetch runs in the page origin (linkedin.com) so it can't
+  // attach our cookies. Background fetches on behalf of the extension origin.
+  if (message.type === 'API_FETCH') {
+    (async () => {
+      try {
+        const res = await authedFetch(message.path, {
+          method: message.method || 'GET',
+          headers: message.body ? { 'Content-Type': 'application/json' } : undefined,
+          body: message.body ? JSON.stringify(message.body) : undefined,
+        });
+        const data = await res.json().catch(() => ({}));
+        sendResponse({ ok: res.ok, status: res.status, data });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+    })();
+    return true;
+  }
 });
 
 // ── Core Sync ─────────────────────────────────────────────────────────────────

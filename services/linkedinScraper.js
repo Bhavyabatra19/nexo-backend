@@ -193,4 +193,4 @@ function splitName(fullName) {
   };
 }
 
-module.exports = { processExtensionProfile, processConnectionsBatch };
+module.exports = { processExtensionProfile, processConnectionsBatch, normalizeLinkedInUrl };

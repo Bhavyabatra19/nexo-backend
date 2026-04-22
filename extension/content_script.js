@@ -21,6 +21,7 @@
     waitForElement('h1', () => {
       captureCurrentProfile();
       injectNexoButton();
+      mountWidget();
     });
   }
 
@@ -600,6 +601,282 @@
     setTimeout(() => observer.disconnect(), maxWait);
   }
 
+  // ── Dex-style in-page widget ───────────────────────────────────────────────
+
+  const WIDGET_HOST_ID = 'nexo-widget-host';
+  const FRONTEND_URL = 'https://nexo-frontend-indol.vercel.app';
+
+  function currentProfileUrl() {
+    return window.location.href.split('?')[0].replace(/\/$/, '');
+  }
+
+  async function apiFetch(path, opts = {}) {
+    return new Promise(resolve => {
+      chrome.runtime.sendMessage(
+        { type: 'API_FETCH', path, method: opts.method, body: opts.body },
+        (res) => {
+          if (chrome.runtime.lastError) return resolve({ ok: false, error: chrome.runtime.lastError.message });
+          resolve(res || { ok: false, error: 'no response' });
+        }
+      );
+    });
+  }
+
+  function unmountWidget() {
+    document.getElementById(WIDGET_HOST_ID)?.remove();
+  }
+
+  function mountWidget() {
+    if (document.getElementById(WIDGET_HOST_ID)) return;
+
+    const host = document.createElement('div');
+    host.id = WIDGET_HOST_ID;
+    host.style.cssText = 'position:fixed;top:88px;right:16px;z-index:99998;all:initial;';
+    document.body.appendChild(host);
+
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = `
+      <style>${widgetStyles()}</style>
+      <div class="w-wrap" id="w-wrap">
+        <button class="w-pill" id="w-pill" title="Nexo">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        </button>
+        <div class="w-panel" id="w-panel">
+          <div class="w-header">
+            <div class="w-brand">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+              <span>Nexo</span>
+            </div>
+            <button class="w-x" id="w-close" title="Collapse">—</button>
+          </div>
+          <div class="w-body" id="w-body">
+            <div class="w-spinner"></div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const pill   = root.getElementById('w-pill');
+    const panel  = root.getElementById('w-panel');
+    const close  = root.getElementById('w-close');
+    const body   = root.getElementById('w-body');
+
+    pill.addEventListener('click', () => {
+      panel.classList.add('w-open');
+      pill.classList.add('w-hide');
+    });
+    close.addEventListener('click', () => {
+      panel.classList.remove('w-open');
+      pill.classList.remove('w-hide');
+    });
+
+    // Start expanded so the user sees it. Toggle to pill on close.
+    panel.classList.add('w-open');
+    pill.classList.add('w-hide');
+
+    loadWidget(body);
+  }
+
+  async function loadWidget(body) {
+    const url = currentProfileUrl();
+    const res = await apiFetch(`/api/extension/contact?url=${encodeURIComponent(url)}`);
+
+    if (res.status === 401 || res.error) {
+      body.innerHTML = `
+        <div class="w-empty">
+          <p class="w-muted">Sign in to see your CRM data for this profile.</p>
+          <a class="w-btn w-btn-primary" href="${FRONTEND_URL}" target="_blank">Sign in to Nexo →</a>
+        </div>`;
+      return;
+    }
+
+    const data = res.data || {};
+    if (!data.found) {
+      body.innerHTML = `
+        <div class="w-empty">
+          <p class="w-muted">Not in your Nexo yet.</p>
+          <button class="w-btn w-btn-primary" id="w-save">Save to Nexo</button>
+        </div>`;
+      body.querySelector('#w-save').addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true; btn.textContent = 'Saving…';
+        // Reuse existing save flow: send a PROFILE_CAPTURED to background.
+        chrome.runtime.sendMessage(
+          { type: 'PROFILE_CAPTURED', data: extractProfileFromDOM() },
+          () => setTimeout(() => loadWidget(body), 800)
+        );
+      });
+      return;
+    }
+
+    renderContact(body, data.contact, data.notes || []);
+  }
+
+  function renderContact(body, contact, notes) {
+    const tagChips = (contact.tags || []).map(t =>
+      `<span class="w-chip">${escapeHtml(t)}</span>`).join('');
+
+    const notesHtml = notes.length
+      ? notes.map(n => `
+          <div class="w-note">
+            <div class="w-note-date">${formatDate(n.createdAt)}</div>
+            <div class="w-note-body">${escapeHtml(n.content)}</div>
+          </div>`).join('')
+      : `<p class="w-muted w-small">No notes yet.</p>`;
+
+    body.innerHTML = `
+      <div class="w-row">
+        <div class="w-status">✓ In your network</div>
+        ${contact.connection_tier ? `<span class="w-chip w-chip-small">${contact.connection_tier === 1 ? '1st' : contact.connection_tier === 2 ? '2nd' : '3rd'}</span>` : ''}
+      </div>
+      ${contact.job_title || contact.company ? `
+        <div class="w-meta">
+          ${contact.job_title ? `<div>${escapeHtml(contact.job_title)}</div>` : ''}
+          ${contact.company ? `<div class="w-muted">${escapeHtml(contact.company)}</div>` : ''}
+        </div>` : ''}
+      ${tagChips ? `<div class="w-chips">${tagChips}</div>` : ''}
+
+      <div class="w-section-label">Notes</div>
+      <div class="w-notes" id="w-notes">${notesHtml}</div>
+
+      <form id="w-note-form" class="w-note-form">
+        <textarea id="w-note-input" placeholder="Add a note…" rows="2"></textarea>
+        <button type="submit" class="w-btn w-btn-primary w-btn-small">Save note</button>
+      </form>
+
+      <a class="w-link" href="${FRONTEND_URL}/dashboard/contacts/${contact.id}" target="_blank">Open in Nexo →</a>
+    `;
+
+    const form  = body.querySelector('#w-note-form');
+    const input = body.querySelector('#w-note-input');
+    const list  = body.querySelector('#w-notes');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const content = input.value.trim();
+      if (!content) return;
+      const submitBtn = form.querySelector('button');
+      submitBtn.disabled = true; submitBtn.textContent = 'Saving…';
+
+      const res = await apiFetch('/api/extension/note', {
+        method: 'POST',
+        body: { contact_id: contact.id, content },
+      });
+      submitBtn.disabled = false; submitBtn.textContent = 'Save note';
+
+      if (res.ok && res.data?.note) {
+        input.value = '';
+        const n = res.data.note;
+        const html = `
+          <div class="w-note">
+            <div class="w-note-date">${formatDate(n.createdAt)}</div>
+            <div class="w-note-body">${escapeHtml(n.content)}</div>
+          </div>`;
+        // Replace "No notes yet" if present
+        if (list.querySelector('.w-muted')) list.innerHTML = '';
+        list.insertAdjacentHTML('afterbegin', html);
+      }
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+
+  function formatDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const diffDays = (Date.now() - d.getTime()) / 86400000;
+    if (diffDays < 1)  return 'today';
+    if (diffDays < 2)  return 'yesterday';
+    if (diffDays < 7)  return `${Math.floor(diffDays)}d ago`;
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
+  function widgetStyles() {
+    return `
+      :host, * { all: initial; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; box-sizing: border-box; }
+      .w-wrap { display: block; }
+      .w-pill {
+        display: flex; align-items: center; justify-content: center;
+        width: 44px; height: 44px; border-radius: 50%;
+        background: #6366f1; color: #fff; cursor: pointer;
+        box-shadow: 0 4px 16px rgba(99,102,241,0.35); border: none;
+      }
+      .w-pill:hover { background: #4f46e5; }
+      .w-hide { display: none; }
+
+      .w-panel {
+        display: none;
+        width: 340px; max-height: 80vh; overflow-y: auto;
+        background: #fff; border: 1px solid #e5e7eb;
+        border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,0.15);
+      }
+      .w-open { display: block; }
+
+      .w-header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 10px 14px; border-bottom: 1px solid #f1f5f9;
+      }
+      .w-brand { display: flex; align-items: center; gap: 6px; font-weight: 700; color: #111; font-size: 13px; }
+      .w-x { background: none; border: none; color: #64748b; cursor: pointer; font-size: 16px; line-height: 1; padding: 2px 6px; }
+      .w-x:hover { color: #111; }
+
+      .w-body { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+      .w-spinner {
+        width: 18px; height: 18px; margin: 10px auto;
+        border: 2px solid #e5e7eb; border-top-color: #6366f1;
+        border-radius: 50%; animation: wspin 0.7s linear infinite;
+      }
+      @keyframes wspin { to { transform: rotate(360deg); } }
+
+      .w-row { display: flex; align-items: center; gap: 8px; }
+      .w-status { color: #22c55e; font-weight: 600; font-size: 13px; }
+      .w-meta { font-size: 13px; color: #111; line-height: 1.4; display: flex; flex-direction: column; gap: 2px; }
+      .w-muted { color: #64748b; font-size: 13px; }
+      .w-small { font-size: 12px; }
+
+      .w-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+      .w-chip {
+        display: inline-block; padding: 2px 8px; border-radius: 999px;
+        background: #eef2ff; color: #4338ca; font-size: 11px; font-weight: 600;
+      }
+      .w-chip-small { font-size: 10px; padding: 1px 6px; }
+
+      .w-section-label { font-size: 10px; font-weight: 700; text-transform: uppercase; color: #64748b; letter-spacing: 0.5px; margin-top: 2px; }
+
+      .w-notes { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
+      .w-note { background: #f8fafc; border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+      .w-note-date { font-size: 10px; color: #94a3b8; font-weight: 600; text-transform: uppercase; }
+      .w-note-body { font-size: 13px; color: #111; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+
+      .w-note-form { display: flex; flex-direction: column; gap: 6px; }
+      .w-note-form textarea {
+        width: 100%; resize: vertical; min-height: 44px;
+        padding: 8px 10px; border: 1px solid #e5e7eb; border-radius: 8px;
+        font-size: 13px; color: #111; background: #fff;
+        font-family: inherit;
+      }
+      .w-note-form textarea:focus { outline: none; border-color: #6366f1; }
+
+      .w-btn {
+        display: inline-flex; align-items: center; justify-content: center;
+        padding: 8px 12px; border: none; border-radius: 8px;
+        font-size: 13px; font-weight: 600; cursor: pointer;
+      }
+      .w-btn-primary { background: #6366f1; color: #fff; }
+      .w-btn-primary:hover { background: #4f46e5; }
+      .w-btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+      .w-btn-small { padding: 6px 10px; font-size: 12px; align-self: flex-start; }
+
+      .w-empty { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+      .w-link { font-size: 12px; color: #6366f1; text-decoration: none; font-weight: 600; }
+      .w-link:hover { text-decoration: underline; }
+    `;
+  }
+
   // ── SPA navigation watcher ─────────────────────────────────────────────────
   // LinkedIn never does full page reloads; watch for URL changes via pushState.
 
@@ -613,11 +890,13 @@
     window.__nexoScanActive = false;
     const existing = document.getElementById('nexo-scan-badge');
     if (existing) existing.remove();
+    unmountWidget();
 
     if (isProfilePage()) {
       waitForElement('h1', () => {
         captureCurrentProfile();
         if (!document.getElementById('nexo-save-btn')) injectNexoButton();
+        mountWidget();
       });
     }
 
