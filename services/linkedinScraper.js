@@ -27,6 +27,7 @@ async function processExtensionProfile(userId, profileData) {
     linkedin_url, name, headline, company, location,
     connection_degree, profile_pic, captured_at,
     bio, experience, education, skills,
+    connected_at,  // ISO string parsed from "Connected MMM YYYY" on list cards
   } = profileData;
 
   if (!linkedin_url || !name) return null;
@@ -67,6 +68,7 @@ async function processExtensionProfile(userId, profileData) {
           enrichment_provider = CASE WHEN $5::jsonb IS NOT NULL THEN 'extension' ELSE enrichment_provider END,
           enriched_at      = CASE WHEN $5::jsonb IS NOT NULL THEN NOW() ELSE enriched_at END,
           custom_fields    = custom_fields || $8::jsonb,
+          linkedin_connected_at = COALESCE(linkedin_connected_at, $10::timestamptz),
           pinecone_indexed = false
         WHERE id = $9
       `, [
@@ -77,6 +79,7 @@ async function processExtensionProfile(userId, profileData) {
         skills?.length     ? JSON.stringify(skills)     : null,
         JSON.stringify({ last_change_detected: new Date(), changes }),
         contact.id,
+        connected_at || null,
       ]);
 
       if (changes.length) logger.info(`[LinkedInScraper] Updated ${name}: ${changes.join(', ')}`);
@@ -106,13 +109,15 @@ async function processExtensionProfile(userId, profileData) {
     INSERT INTO contacts
       (user_id, full_name, first_name, last_name, job_title, company,
        linkedin_url, photo_url, bio, experience, education, skills,
-       source, enrichment_status, enrichment_provider, enriched_at, pinecone_indexed)
+       source, enrichment_status, enrichment_provider, enriched_at, pinecone_indexed,
+       linkedin_connected_at)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
             $10::jsonb, $11::jsonb, $12::jsonb,
             'chrome_extension', $13::text,
             CASE WHEN $13::text = 'enriched' THEN 'extension'::text ELSE NULL::text END,
             CASE WHEN $13::text = 'enriched' THEN NOW() ELSE NULL::timestamptz END,
-            false)
+            false,
+            $14::timestamptz)
     ON CONFLICT DO NOTHING
     RETURNING id
   `, [
@@ -122,6 +127,7 @@ async function processExtensionProfile(userId, profileData) {
     education?.length  ? JSON.stringify(education)  : '[]',
     skills?.length     ? JSON.stringify(skills)     : '[]',
     enrichmentStatus,
+    connected_at || null,
   ]);
 
   if (!inserted.length) return null;

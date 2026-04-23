@@ -107,7 +107,7 @@ router.get('/contact', authenticateToken, async (req, res) => {
   const { rows } = await db.query(
     `SELECT c.id, c.first_name, c.last_name, c.full_name, c.job_title, c.company,
             c.photo_url, c.bio, c.linkedin_url, c.connection_tier, c.enrichment_status,
-            c.enriched_at, c.updated_at,
+            c.enriched_at, c.updated_at, c.linkedin_connected_at,
             COALESCE(array_remove(array_agg(t.name), NULL), '{}') AS tags
        FROM contacts c
        LEFT JOIN contact_tags ct ON ct.contact_id = c.id
@@ -141,6 +141,7 @@ router.get('/contact', authenticateToken, async (req, res) => {
       tags: contact.tags || [],
       enriched_at: contact.enriched_at,
       updated_at: contact.updated_at,
+      linkedin_connected_at: contact.linkedin_connected_at,
     },
     notes,
   });
