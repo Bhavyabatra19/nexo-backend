@@ -148,7 +148,7 @@ router.post('/:contactId/check-now', authenticateToken, async (req, res) => {
       userId:      req.userId,
     }, {
       // Use a unique jobId so repeated "check-now" doesn't deduplicate
-      jobId: `monitor-now:${monitor.id}:${Date.now()}`,
+      jobId: `monitor-now_${monitor.id}_${Date.now()}`,
       priority: 1,
     });
 

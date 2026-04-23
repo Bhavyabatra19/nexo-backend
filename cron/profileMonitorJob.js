@@ -35,7 +35,7 @@ async function scheduleMonitorJobs() {
         linkedinUrl: m.linkedin_url,
         userId:      m.user_id,
       }, {
-        jobId: `monitor:${m.id}`, // deduplicate; BullMQ ignores if same jobId already queued
+        jobId: `monitor_${m.id}`, // deduplicate; BullMQ rejects ":" in custom jobIds
       });
     }
 

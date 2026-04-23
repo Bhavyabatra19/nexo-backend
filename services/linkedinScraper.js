@@ -98,6 +98,10 @@ async function processExtensionProfile(userId, profileData) {
   // If we have rich data from the DOM, mark as enriched immediately
   const enrichmentStatus = hasRichData ? 'enriched' : 'queued';
 
+  // Explicit ::text casts on $13 and typed NULL literals in the CASE ELSE
+  // branches — without these, pgx can't unify a single inferred type for $13
+  // across its three positions and throws "inconsistent types deduced for
+  // parameter $13".
   const { rows: inserted } = await db.query(`
     INSERT INTO contacts
       (user_id, full_name, first_name, last_name, job_title, company,
@@ -105,9 +109,9 @@ async function processExtensionProfile(userId, profileData) {
        source, enrichment_status, enrichment_provider, enriched_at, pinecone_indexed)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
             $10::jsonb, $11::jsonb, $12::jsonb,
-            'chrome_extension', $13,
-            CASE WHEN $13 = 'enriched' THEN 'extension' ELSE NULL END,
-            CASE WHEN $13 = 'enriched' THEN NOW() ELSE NULL END,
+            'chrome_extension', $13::text,
+            CASE WHEN $13::text = 'enriched' THEN 'extension'::text ELSE NULL::text END,
+            CASE WHEN $13::text = 'enriched' THEN NOW() ELSE NULL::timestamptz END,
             false)
     ON CONFLICT DO NOTHING
     RETURNING id
@@ -134,7 +138,7 @@ async function processExtensionProfile(userId, profileData) {
   // jobId = contactId ensures the same contact is never double-queued.
   if (!hasRichData) {
     await enrichQueue.add('enrich', { contactId, linkedinUrl: cleanUrl, userId }, {
-      jobId:    `enrich:${contactId}`,
+      jobId:    `enrich_${contactId}`,
       priority: 5,
       attempts: 3,
       backoff:  { type: 'exponential', delay: 2000 },
