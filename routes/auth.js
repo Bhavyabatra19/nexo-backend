@@ -154,7 +154,9 @@ router.get('/me', require('../middleware/auth').authenticateToken, async (req, r
         fullName: req.user.full_name,
         profilePicture: req.user.profile_picture,
         createdAt: req.user.created_at,
-        lastLogin: req.user.last_login
+        lastLogin: req.user.last_login,
+        isPlatformAdmin: req.user.is_platform_admin === true,
+        orgDomain: req.user.org_domain || null,
       },
       statistics: stats
     });

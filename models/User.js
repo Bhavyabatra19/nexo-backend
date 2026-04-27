@@ -10,13 +10,17 @@ class UserModel {
    * Create a new user
    */
   static async create({ email, fullName, googleId, profilePicture }) {
+    const orgDomain = email && email.includes('@')
+      ? email.split('@')[1].toLowerCase()
+      : null;
+
     const query = `
-      INSERT INTO users (email, full_name, google_id, profile_picture, last_login)
-      VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+      INSERT INTO users (email, full_name, google_id, profile_picture, org_domain, last_login)
+      VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
       RETURNING *
     `;
-    
-    const result = await db.query(query, [email, fullName, googleId, profilePicture]);
+
+    const result = await db.query(query, [email, fullName, googleId, profilePicture, orgDomain]);
     return result.rows[0];
   }
 

@@ -51,6 +51,8 @@ const groupsRoutes = require('./routes/groups');
 const searchRoutes = require('./routes/search');
 const introsRoutes = require('./routes/intros');
 const extensionRoutes = require('./routes/extension');
+const communityRoutes = require('./routes/community');
+const adminRoutes = require('./routes/admin');
 
 // Import database
 const db = require('./db');
@@ -160,6 +162,8 @@ app.use('/api/groups', groupsRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/intros', introsRoutes);
 app.use('/api/extension', extensionRoutes);
+app.use('/api/community', communityRoutes);
+app.use('/api/admin', adminRoutes);
 
 // Serve extension zip for download
 app.use('/public', express.static(require('path').join(__dirname, 'public')));
