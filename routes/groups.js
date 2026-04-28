@@ -15,15 +15,26 @@
  * GET    /api/groups/:id/join-requests        — pending requests (admin)
  * POST   /api/groups/:id/join-requests/:reqId/approve — approve request (admin)
  * POST   /api/groups/:id/join-requests/:reqId/reject  — reject request (admin)
+ * POST   /api/groups/:id/contacts/csv/preview         — admin: parse CSV, return columns + suggested mapping
+ * POST   /api/groups/:id/contacts/csv/import          — admin: ingest contacts with confirmed mapping
  */
 
 const express = require('express');
 const router  = express.Router();
+const multer  = require('multer');
 const { authenticateToken } = require('../middleware/auth');
 const { requireApprovedKyc } = require('../middleware/requireApprovedKyc');
 const db = require('../db');
-const { networkScanQueue } = require('../workers/queues');
+const { networkScanQueue, enrichQueue, embedQueue } = require('../workers/queues');
+const csvImporter = require('../services/csvImporter');
 const logger = require('../logger');
+
+// CSV upload — memory storage (we parse immediately, never persist the raw
+// file). 5MB cap is plenty for ~5000 contact rows.
+const csvUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
 
 // Resolve email domain for the requesting user. Falls back to parsing
 // req.user.email if org_domain wasn't backfilled (defence in depth).
@@ -480,6 +491,197 @@ router.delete('/:id/members/:memberId', authenticateToken, async (req, res) => {
   );
 
   res.json({ success: true });
+});
+
+// ── CSV Upload: Preview ──────────────────────────────────────────────────────
+// Step 1 of two-step ingest. Owner uploads a CSV; we parse it, suggest a
+// column → contact-field mapping, and hand the parsed rows back so the
+// import call is stateless on the server.
+router.post('/:id/contacts/csv/preview', authenticateToken, csvUpload.single('file'), async (req, res) => {
+  if (!(await isGroupAdmin(req.params.id, req.userId))) {
+    return res.status(403).json({ success: false, error: 'Admin only' });
+  }
+  if (!req.file?.buffer) {
+    return res.status(400).json({ success: false, error: 'CSV file is required (form field: file)' });
+  }
+
+  let text;
+  try {
+    text = req.file.buffer.toString('utf8');
+  } catch (e) {
+    return res.status(400).json({ success: false, error: 'File is not valid UTF-8 text' });
+  }
+
+  const preview = csvImporter.parsePreview(text);
+  if (!preview.columns.length) {
+    return res.status(400).json({ success: false, error: 'No header row detected — is this a CSV?' });
+  }
+
+  res.json({
+    success: true,
+    columns:           preview.columns,
+    sample_rows:       preview.rows,
+    rows:              preview.all_rows,
+    total_rows:        preview.total_rows,
+    truncated:         preview.truncated,
+    header_row_index:  preview.header_row_index,
+    suggested_mapping: preview.suggested,
+    canonical_fields:  csvImporter.CANONICAL_FIELDS,
+    max_rows:          csvImporter.MAX_IMPORT_ROWS,
+  });
+});
+
+// ── CSV Upload: Import ───────────────────────────────────────────────────────
+// Step 2. Body: { rows: [{header: value}], mapping: { full_name: "Name", ... }, dry_run?: bool }
+// Inserts contacts into the requesting admin's contact list with
+// source='community_csv' and imported_for_group_id=:id. Dedupes against
+// existing contacts by (linkedin_url) then (email). Queues enrichment and
+// the existing network-overlap scan after a non-trivial import.
+router.post('/:id/contacts/csv/import', authenticateToken, async (req, res) => {
+  if (!(await isGroupAdmin(req.params.id, req.userId))) {
+    return res.status(403).json({ success: false, error: 'Admin only' });
+  }
+
+  const { rows: payloadRows, mapping, dry_run } = req.body || {};
+  if (!Array.isArray(payloadRows) || !payloadRows.length) {
+    return res.status(400).json({ success: false, error: 'rows[] is required' });
+  }
+  if (payloadRows.length > csvImporter.MAX_IMPORT_ROWS) {
+    return res.status(413).json({ success: false, error: `Too many rows (${payloadRows.length}). Max ${csvImporter.MAX_IMPORT_ROWS} per import.` });
+  }
+  if (!mapping || typeof mapping !== 'object') {
+    return res.status(400).json({ success: false, error: 'mapping object is required' });
+  }
+  const hasIdentifier = mapping.full_name || (mapping.first_name && mapping.last_name) || mapping.email || mapping.linkedin_url;
+  if (!hasIdentifier) {
+    return res.status(400).json({ success: false, error: 'mapping must include full_name (or first+last), email, or linkedin_url' });
+  }
+
+  // Confirm group exists (FK is set, but a 404 is friendlier than a constraint error).
+  const { rows: groupCheck } = await db.query(`SELECT id FROM groups WHERE id = $1`, [req.params.id]);
+  if (!groupCheck.length) return res.status(404).json({ success: false, error: 'Group not found' });
+
+  const built = csvImporter.buildContactsFromMapping(payloadRows, mapping);
+  const summary = {
+    total:               payloadRows.length,
+    valid:               built.contacts.length,
+    skipped_invalid:     built.errors.length,
+    skipped_duplicates:  0,
+    inserted:            0,
+    updated:             0,
+    errors:              built.errors.slice(0, 50),
+  };
+
+  if (!built.contacts.length) {
+    return res.json({ success: true, dry_run: !!dry_run, ...summary });
+  }
+
+  // Pull existing contacts for this user keyed by (lower) email and linkedin_url
+  // so we can dedupe in one query. Rare collisions on full_name alone aren't
+  // worth deduping — false positives outweigh the benefit.
+  const emails       = built.contacts.map(c => c.email).filter(Boolean);
+  const linkedinUrls = built.contacts.map(c => c.linkedin_url).filter(Boolean);
+
+  const { rows: existing } = await db.query(
+    `SELECT id, LOWER(email) AS email, LOWER(linkedin_url) AS linkedin_url
+       FROM contacts
+      WHERE user_id = $1
+        AND ((email IS NOT NULL AND LOWER(email) = ANY($2))
+          OR (linkedin_url IS NOT NULL AND LOWER(linkedin_url) = ANY($3)))`,
+    [req.userId, emails, linkedinUrls]
+  );
+
+  const byEmail    = new Map();
+  const byLinkedin = new Map();
+  for (const r of existing) {
+    if (r.email)        byEmail.set(r.email, r.id);
+    if (r.linkedin_url) byLinkedin.set(r.linkedin_url, r.id);
+  }
+
+  if (dry_run) {
+    let dupes = 0;
+    for (const c of built.contacts) {
+      if ((c.email && byEmail.has(c.email)) || (c.linkedin_url && byLinkedin.has(c.linkedin_url))) dupes++;
+    }
+    summary.skipped_duplicates = dupes;
+    summary.inserted = built.contacts.length - dupes;
+    return res.json({ success: true, dry_run: true, ...summary });
+  }
+
+  const client = await db.getClient();
+  const insertedContactIds = [];
+  try {
+    await client.query('BEGIN');
+
+    for (const c of built.contacts) {
+      const matchId = (c.email && byEmail.get(c.email)) || (c.linkedin_url && byLinkedin.get(c.linkedin_url));
+      if (matchId) {
+        // Existing contact — fill in any missing fields and tag with the group
+        // for provenance. Don't overwrite anything that's already set; the
+        // CSV is rarely fresher than what the user already has.
+        await client.query(
+          `UPDATE contacts SET
+             full_name             = COALESCE(full_name,             $2),
+             first_name            = COALESCE(first_name,            $3),
+             last_name             = COALESCE(last_name,             $4),
+             email                 = COALESCE(email,                 $5),
+             phone                 = COALESCE(phone,                 $6),
+             linkedin_url          = COALESCE(linkedin_url,          $7),
+             company               = COALESCE(company,               $8),
+             job_title             = COALESCE(job_title,             $9),
+             imported_for_group_id = COALESCE(imported_for_group_id, $10),
+             updated_at            = NOW()
+           WHERE id = $1`,
+          [matchId, c.full_name, c.first_name, c.last_name, c.email, c.phone, c.linkedin_url, c.company, c.job_title, req.params.id]
+        );
+        summary.updated++;
+        continue;
+      }
+
+      const { rows: inserted } = await client.query(
+        `INSERT INTO contacts
+           (user_id, full_name, first_name, last_name, email, phone,
+            linkedin_url, company, job_title, source, imported_for_group_id,
+            enrichment_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'community_csv', $10,
+            CASE WHEN $7 IS NOT NULL THEN 'queued' ELSE 'pending' END)
+         RETURNING id`,
+        [req.userId, c.full_name, c.first_name, c.last_name, c.email, c.phone,
+         c.linkedin_url, c.company, c.job_title, req.params.id]
+      );
+      const newId = inserted[0].id;
+      insertedContactIds.push({ id: newId, linkedin_url: c.linkedin_url });
+      summary.inserted++;
+      // Cache to dedupe duplicates within the same payload.
+      if (c.email)        byEmail.set(c.email, newId);
+      if (c.linkedin_url) byLinkedin.set(c.linkedin_url, newId);
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    logger.error(`[groups:csv-import] failed: ${err.message}`);
+    return res.status(500).json({ success: false, error: err.message });
+  } finally {
+    client.release();
+  }
+
+  // Fire-and-forget post-import work. None of this should block the response.
+  for (const { id, linkedin_url } of insertedContactIds) {
+    if (linkedin_url) {
+      enrichQueue.add('enrich', { contactId: id, linkedinUrl: linkedin_url, userId: req.userId },
+        { jobId: `enrich_${id}` }).catch(e => logger.warn(`[groups:csv-import] enrich enqueue failed: ${e.message}`));
+    } else {
+      embedQueue.add('embed', { contactId: id, userId: req.userId },
+        { jobId: `embed_${id}` }).catch(() => {});
+    }
+  }
+  if (summary.inserted + summary.updated > 0) {
+    networkScanQueue.add('scan', { userId: req.userId, groupId: req.params.id },
+      { jobId: `netscan_${req.userId}_${req.params.id}_${Date.now()}` }).catch(() => {});
+  }
+
+  res.json({ success: true, dry_run: false, ...summary });
 });
 
 module.exports = router;
