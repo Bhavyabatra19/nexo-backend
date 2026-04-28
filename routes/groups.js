@@ -112,6 +112,56 @@ router.get('/', authenticateToken, async (req, res) => {
   res.json({ success: true, groups: rows });
 });
 
+// ── Discoverable: communities I'm eligible to auto-join or request to join ────
+// Listed before /:id so the literal path doesn't get captured as an :id.
+router.get('/discoverable', authenticateToken, async (req, res) => {
+  const domain = userDomain(req);
+  const email  = req.user?.email || null;
+  if (!domain) return res.json({ success: true, communities: [] });
+
+  // Pull every active group with at least one rule the user matches, plus the
+  // user's existing membership/request state so the UI can render correct CTAs.
+  const { rows } = await db.query(`
+    SELECT
+      g.id, g.name, g.description, g.logo_url, g.invite_code,
+      (SELECT COUNT(*) FROM group_members m WHERE m.group_id = g.id) AS member_count,
+      (
+        SELECT json_agg(r.*) FROM group_membership_rules r
+         WHERE r.group_id = g.id AND r.rule_type IN ('email_domain','email_pattern')
+      ) AS rules,
+      gm.role AS my_role,
+      gjr.status AS my_request_status
+    FROM groups g
+    LEFT JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = $1
+    LEFT JOIN group_join_requests gjr ON gjr.group_id = g.id AND gjr.user_id = $1
+    WHERE g.is_active = true
+      AND EXISTS (
+        SELECT 1 FROM group_membership_rules r
+         WHERE r.group_id = g.id AND r.rule_type IN ('email_domain','email_pattern')
+      )
+    ORDER BY member_count DESC NULLS LAST, g.created_at DESC
+  `, [req.userId]);
+
+  const communities = rows
+    .map((g) => {
+      const matched = (g.rules || []).find((r) => ruleMatches(r, { domain, email }));
+      if (!matched) return null;
+      return {
+        id: g.id,
+        name: g.name,
+        description: g.description,
+        logo_url: g.logo_url,
+        member_count: Number(g.member_count) || 0,
+        my_role: g.my_role,
+        my_request_status: g.my_request_status,
+        match: { rule_id: matched.id, rule_type: matched.rule_type, pattern: matched.pattern, auto_approve: matched.auto_approve },
+      };
+    })
+    .filter(Boolean);
+
+  res.json({ success: true, communities });
+});
+
 // ── Group Details + Stats ─────────────────────────────────────────────────────
 router.get('/:id', authenticateToken, async (req, res) => {
   // Must be a member
@@ -228,56 +278,6 @@ router.get('/:id/members', authenticateToken, async (req, res) => {
   `, [req.params.id]);
 
   res.json({ success: true, members: rows });
-});
-
-// ── Discoverable: communities I'm eligible to auto-join or request to join ────
-// Listed before /:id so the literal path doesn't get captured as an :id.
-router.get('/discoverable', authenticateToken, async (req, res) => {
-  const domain = userDomain(req);
-  const email  = req.user?.email || null;
-  if (!domain) return res.json({ success: true, communities: [] });
-
-  // Pull every active group with at least one rule the user matches, plus the
-  // user's existing membership/request state so the UI can render correct CTAs.
-  const { rows } = await db.query(`
-    SELECT
-      g.id, g.name, g.description, g.logo_url, g.invite_code,
-      (SELECT COUNT(*) FROM group_members m WHERE m.group_id = g.id) AS member_count,
-      (
-        SELECT json_agg(r.*) FROM group_membership_rules r
-         WHERE r.group_id = g.id AND r.rule_type IN ('email_domain','email_pattern')
-      ) AS rules,
-      gm.role AS my_role,
-      gjr.status AS my_request_status
-    FROM groups g
-    LEFT JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = $1
-    LEFT JOIN group_join_requests gjr ON gjr.group_id = g.id AND gjr.user_id = $1
-    WHERE g.is_active = true
-      AND EXISTS (
-        SELECT 1 FROM group_membership_rules r
-         WHERE r.group_id = g.id AND r.rule_type IN ('email_domain','email_pattern')
-      )
-    ORDER BY member_count DESC NULLS LAST, g.created_at DESC
-  `, [req.userId]);
-
-  const communities = rows
-    .map((g) => {
-      const matched = (g.rules || []).find((r) => ruleMatches(r, { domain, email }));
-      if (!matched) return null;
-      return {
-        id: g.id,
-        name: g.name,
-        description: g.description,
-        logo_url: g.logo_url,
-        member_count: Number(g.member_count) || 0,
-        my_role: g.my_role,
-        my_request_status: g.my_request_status,
-        match: { rule_id: matched.id, rule_type: matched.rule_type, pattern: matched.pattern, auto_approve: matched.auto_approve },
-      };
-    })
-    .filter(Boolean);
-
-  res.json({ success: true, communities });
 });
 
 // ── Request to Join (rule-matched auto-join, or pending request) ──────────────
