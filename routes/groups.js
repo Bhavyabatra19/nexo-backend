@@ -25,7 +25,7 @@ const multer  = require('multer');
 const { authenticateToken } = require('../middleware/auth');
 const { requireApprovedKyc } = require('../middleware/requireApprovedKyc');
 const db = require('../db');
-const { networkScanQueue, enrichQueue, embedQueue } = require('../workers/queues');
+const { networkScanQueue, enrichQueue, embedQueue, enrichBulkQueue } = require('../workers/queues');
 const csvImporter = require('../services/csvImporter');
 const logger = require('../logger');
 
@@ -682,6 +682,124 @@ router.post('/:id/contacts/csv/import', authenticateToken, async (req, res) => {
   }
 
   res.json({ success: true, dry_run: false, ...summary });
+});
+
+// ── List Imported Contacts (admin) ───────────────────────────────────────────
+// Surfaces every contact the admin imported into this community (via CSV
+// upload) so the UI can render an enrichment-status table and select which
+// rows to enrich next.
+router.get('/:id/contacts/imported', authenticateToken, async (req, res) => {
+  if (!(await isGroupAdmin(req.params.id, req.userId))) {
+    return res.status(403).json({ success: false, error: 'Admin only' });
+  }
+  const limit  = Math.min(1000, Math.max(1, parseInt(req.query.limit, 10)  || 500));
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+
+  const { rows } = await db.query(
+    `SELECT id, full_name, first_name, last_name, email, linkedin_url,
+            company, job_title, photo_url, bio,
+            enrichment_status, enriched_at, enrichment_provider,
+            connections_count, followers_count, last_post, last_post_at,
+            experience, education,
+            created_at, updated_at
+       FROM contacts
+      WHERE user_id = $1 AND imported_for_group_id = $2
+      ORDER BY created_at DESC
+      LIMIT $3 OFFSET $4`,
+    [req.userId, req.params.id, limit, offset]
+  );
+
+  // Aggregate counts so the UI can render status badges without a second call.
+  const { rows: stats } = await db.query(
+    `SELECT
+       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE linkedin_url IS NOT NULL)::int AS with_linkedin,
+       COUNT(*) FILTER (WHERE enrichment_status = 'enriched')::int AS enriched,
+       COUNT(*) FILTER (WHERE enrichment_status IN ('queued','enriching'))::int AS in_progress,
+       COUNT(*) FILTER (WHERE enrichment_status = 'failed')::int AS failed
+     FROM contacts
+     WHERE user_id = $1 AND imported_for_group_id = $2`,
+    [req.userId, req.params.id]
+  );
+
+  res.json({ success: true, contacts: rows, stats: stats[0] });
+});
+
+// ── Bulk Enrich Imported Contacts (admin) ────────────────────────────────────
+// Body: { contact_ids?: uuid[], all?: bool }
+//   - contact_ids: enrich only this subset (still scoped to the group)
+//   - all=true:    enrich every imported contact in the group that has a
+//                  LinkedIn URL and isn't already enriched/enriching
+// Marks each target contact 'queued' and enqueues a single bulk job that
+// fans out to Bright Data in 100-URL batches.
+router.post('/:id/contacts/enrich', authenticateToken, async (req, res) => {
+  if (!(await isGroupAdmin(req.params.id, req.userId))) {
+    return res.status(403).json({ success: false, error: 'Admin only' });
+  }
+  const { contact_ids, all } = req.body || {};
+  const wantAll = !!all;
+  const ids = Array.isArray(contact_ids) ? contact_ids.filter(s => typeof s === 'string') : [];
+
+  if (!wantAll && ids.length === 0) {
+    return res.status(400).json({ success: false, error: 'Provide contact_ids[] or all:true' });
+  }
+
+  // Pull the eligible set in one query so we always validate ownership +
+  // group scope + presence of linkedin_url server-side.
+  const params = [req.userId, req.params.id];
+  let where = `user_id = $1 AND imported_for_group_id = $2 AND linkedin_url IS NOT NULL`;
+  if (wantAll) {
+    // Don't re-enrich rows already in flight or freshly enriched.
+    where += ` AND (enrichment_status IS NULL OR enrichment_status NOT IN ('enriched','enriching','queued'))`;
+  } else {
+    params.push(ids);
+    where += ` AND id = ANY($3)`;
+  }
+
+  const { rows: eligible } = await db.query(
+    `SELECT id, linkedin_url FROM contacts WHERE ${where}`,
+    params
+  );
+
+  if (!eligible.length) {
+    return res.json({ success: true, queued_count: 0, message: 'Nothing to enrich' });
+  }
+
+  // Cap per-request volume — Bright Data throughput plus per-trigger limits.
+  const MAX = 1000;
+  const targets = eligible.slice(0, MAX);
+  const targetIds = targets.map(t => t.id);
+
+  await db.query(
+    `UPDATE contacts SET enrichment_status = 'queued' WHERE id = ANY($1)`,
+    [targetIds]
+  );
+
+  let jobId = null;
+  try {
+    const job = await enrichBulkQueue.add('enrich', {
+      userId: req.userId,
+      groupId: req.params.id,
+      items: targets.map(t => ({ contactId: t.id, linkedinUrl: t.linkedin_url })),
+    }, { jobId: `enrich_bulk_${req.params.id}_${Date.now()}` });
+    jobId = job.id;
+  } catch (err) {
+    // Redis unavailable — fall back to inline run. Heavy, but matches the
+    // dev-friendly fallback used by the chat scan route.
+    logger.warn(`[groups:enrich] bulk enqueue failed (${err.message}); running inline`);
+    const { enrichBulkViaBrightData } = require('../services/enrichment/adapter');
+    setImmediate(() => {
+      enrichBulkViaBrightData(targets.map(t => ({ contactId: t.id, linkedinUrl: t.linkedin_url })), req.userId)
+        .catch((e) => logger.error(`[groups:enrich] inline run failed: ${e.message}`));
+    });
+  }
+
+  res.json({
+    success: true,
+    queued_count: targets.length,
+    truncated: eligible.length > MAX,
+    job_id: jobId,
+  });
 });
 
 module.exports = router;

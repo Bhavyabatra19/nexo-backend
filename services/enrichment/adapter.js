@@ -55,6 +55,10 @@ async function enrichContact(contactId, linkedinUrl, userId) {
       photo_url           = COALESCE($6, photo_url),
       job_title           = COALESCE($7, job_title),
       company             = COALESCE($8, company),
+      connections_count   = COALESCE($10, connections_count),
+      followers_count     = COALESCE($11, followers_count),
+      last_post           = COALESCE($12::jsonb, last_post),
+      last_post_at        = COALESCE($13::timestamptz, last_post_at),
       pinecone_indexed    = false
     WHERE id = $9
   `, [
@@ -67,6 +71,10 @@ async function enrichContact(contactId, linkedinUrl, userId) {
     result.occupation || result.title || null,
     result.company || null,
     contactId,
+    result.connections_count ?? null,
+    result.followers_count ?? null,
+    result.last_post ? JSON.stringify(result.last_post) : null,
+    result.last_post?.posted_at || null,
   ]);
 
   // Log usage
@@ -121,6 +129,10 @@ async function enrichBulkViaBrightData(items, userId) {
           photo_url           = COALESCE($5, photo_url),
           job_title           = COALESCE($6, job_title),
           company             = COALESCE($7, company),
+          connections_count   = COALESCE($9, connections_count),
+          followers_count     = COALESCE($10, followers_count),
+          last_post           = COALESCE($11::jsonb, last_post),
+          last_post_at        = COALESCE($12::timestamptz, last_post_at),
           pinecone_indexed    = false
         WHERE id = $8
       `, [
@@ -132,6 +144,10 @@ async function enrichBulkViaBrightData(items, userId) {
         result.occupation          || null,
         result.company             || null,
         contactId,
+        result.connections_count ?? null,
+        result.followers_count ?? null,
+        result.last_post ? JSON.stringify(result.last_post) : null,
+        result.last_post?.posted_at || null,
       ]);
 
       await db.query(`

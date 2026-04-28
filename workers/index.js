@@ -8,7 +8,7 @@ const { Worker } = require('bullmq');
 const { getRedisConnection } = require('./queues');
 const logger = require('../logger');
 
-const { enrichContact } = require('../services/enrichment/adapter');
+const { enrichContact, enrichBulkViaBrightData } = require('../services/enrichment/adapter');
 const { recomputeConfidence, recomputeUserConfidence } = require('../services/confidence');
 const { processMessagesForUser } = require('../services/messageParser');
 const { runNetworkScan } = require('../services/networkScan');
@@ -87,6 +87,25 @@ const networkWorker = new Worker('network-scan', async (job) => {
   logger.info(`[Worker:NetworkScan] Done: ${JSON.stringify(result)}`);
   return result;
 }, { connection: conn, concurrency: 3 });
+
+// ─── Bulk Enrichment Worker (Bright Data, community CSV flow) ──────────────
+// Receives { userId, contactIds[], linkedinByContact: {id: url} } and runs
+// enrichBulkViaBrightData. Each Bright Data trigger handles up to 100 URLs
+// internally; we loop in 100-URL batches here only as a safety net.
+const enrichBulkWorker = new Worker('enrich-bulk', async (job) => {
+  const { userId, items } = job.data;
+  if (!Array.isArray(items) || !items.length) return { enriched: 0, failed: 0 };
+  logger.info(`[Worker:EnrichBulk] ${items.length} contacts for user ${userId}`);
+  const result = await enrichBulkViaBrightData(items, userId);
+  // Re-embed enriched contacts so the network scan sees fresh vectors.
+  const { embedQueue } = require('./queues');
+  for (const it of items) {
+    embedQueue.add('embed', { contactId: it.contactId, userId }, { jobId: `embed_${it.contactId}` })
+      .catch(() => {});
+  }
+  logger.info(`[Worker:EnrichBulk] done — enriched=${result.enriched} failed=${result.failed}`);
+  return result;
+}, { connection: conn, concurrency: 1 });
 
 // ─── Scan Query Worker (chat-based network-of-network scan) ────────────────
 const scanQueryWorker = new Worker('scan-query', async (job) => {
@@ -245,7 +264,7 @@ const profileMonitorWorker = new Worker('profile-monitor', async (job) => {
 }, { connection: conn, concurrency: 5 });
 
 // Error handlers
-[enrichmentWorker, embeddingWorker, messageWorker, networkWorker, scanQueryWorker, notificationWorker, profileMonitorWorker].forEach(w => {
+[enrichmentWorker, embeddingWorker, messageWorker, networkWorker, scanQueryWorker, enrichBulkWorker, notificationWorker, profileMonitorWorker].forEach(w => {
   w.on('failed', (job, err) => {
     logger.error(`[Worker] Job ${job?.id} in ${w.name} failed: ${err.message}`);
 
@@ -258,6 +277,6 @@ const profileMonitorWorker = new Worker('profile-monitor', async (job) => {
   });
 });
 
-logger.info('Workers running: enrichment, embedding, message-parse, network-scan, scan-query, notifications, profile-monitor');
+logger.info('Workers running: enrichment, embedding, message-parse, network-scan, scan-query, enrich-bulk, notifications, profile-monitor');
 
-module.exports = { enrichmentWorker, embeddingWorker, messageWorker, networkWorker, scanQueryWorker, notificationWorker, profileMonitorWorker };
+module.exports = { enrichmentWorker, embeddingWorker, messageWorker, networkWorker, scanQueryWorker, enrichBulkWorker, notificationWorker, profileMonitorWorker };

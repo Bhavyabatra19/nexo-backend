@@ -131,9 +131,81 @@ function normalizeProfile(raw) {
     city:    extractCity(raw),
     country: extractCountry(raw),
 
+    connections_count: extractIntMetric(raw, ['connections_count', 'connections', 'connection_count', 'num_connections']),
+    followers_count:   extractIntMetric(raw, ['followers_count', 'followers', 'follower_count', 'num_followers']),
+    last_post:         extractLastPost(raw),
+
     _provider: 'brightdata',
     _raw_url:  raw.url || raw.profile_url || null,
   };
+}
+
+// LinkedIn often shows "500+ connections" — strip non-digits and cap to int.
+function extractIntMetric(raw, candidates) {
+  for (const key of candidates) {
+    const v = raw[key];
+    if (v == null) continue;
+    if (typeof v === 'number') return Math.trunc(v);
+    if (typeof v === 'string') {
+      const digits = v.replace(/[^0-9]/g, '');
+      if (digits) return parseInt(digits, 10);
+    }
+  }
+  return null;
+}
+
+// Bright Data's profile dataset surfaces recent posts under varying keys
+// across plan tiers. Pick the most recent one we can find, normalize the
+// shape, and let the DB store the timestamp + the JSON blob.
+function extractLastPost(raw) {
+  const candidates = [raw.posts, raw.recent_posts, raw.activity, raw.latest_posts];
+  let posts = null;
+  for (const c of candidates) {
+    if (Array.isArray(c) && c.length) { posts = c; break; }
+  }
+  if (!posts) return null;
+
+  const normalized = posts
+    .map((p) => {
+      if (!p || typeof p !== 'object') return null;
+      const text =
+        p.text || p.content || p.post_text || p.body || p.title || null;
+      const url = p.url || p.post_url || p.link || p.permalink || null;
+      const postedAtRaw =
+        p.posted_at || p.date || p.published_at || p.time || p.created_at || null;
+      const posted_at = postedAtRaw ? toIsoSafe(postedAtRaw) : null;
+      const likes    = numericOr(p.likes ?? p.likes_count ?? p.reactions, null);
+      const comments = numericOr(p.comments ?? p.comments_count, null);
+      if (!text && !url) return null;
+      return { text, url, posted_at, likes, comments };
+    })
+    .filter(Boolean);
+
+  if (!normalized.length) return null;
+
+  // Prefer most recent by posted_at, falling back to array order.
+  normalized.sort((a, b) => {
+    const ta = a.posted_at ? Date.parse(a.posted_at) : 0;
+    const tb = b.posted_at ? Date.parse(b.posted_at) : 0;
+    return tb - ta;
+  });
+  return normalized[0];
+}
+
+function toIsoSafe(s) {
+  if (!s) return null;
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+}
+
+function numericOr(v, fallback) {
+  if (v == null) return fallback;
+  if (typeof v === 'number') return Math.trunc(v);
+  if (typeof v === 'string') {
+    const digits = v.replace(/[^0-9]/g, '');
+    return digits ? parseInt(digits, 10) : fallback;
+  }
+  return fallback;
 }
 
 function extractCurrentCompany(raw) {

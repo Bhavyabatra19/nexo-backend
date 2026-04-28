@@ -90,6 +90,18 @@ const scanQueryQueue = new Queue('scan-query', {
   },
 });
 
+// Bulk enrichment via Bright Data (community CSV → enrich-all flow).
+// One job per request; the worker batches up to 100 URLs per Bright Data
+// trigger internally. Single attempt because Bright Data already retries
+// per-URL and the per-contact status persists in the contacts table.
+const enrichBulkQueue = new Queue('enrich-bulk', {
+  connection: getRedisConnection(),
+  defaultJobOptions: {
+    ...defaultJobOptions,
+    attempts: 1,
+  },
+});
+
 module.exports = {
   enrichQueue,
   embedQueue,
@@ -98,5 +110,6 @@ module.exports = {
   notificationQueue,
   profileMonitorQueue,
   scanQueryQueue,
+  enrichBulkQueue,
   getRedisConnection,
 };
