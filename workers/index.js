@@ -12,6 +12,7 @@ const { enrichContact } = require('../services/enrichment/adapter');
 const { recomputeConfidence, recomputeUserConfidence } = require('../services/confidence');
 const { processMessagesForUser } = require('../services/messageParser');
 const { runNetworkScan } = require('../services/networkScan');
+const { runScan: runScanQuery } = require('../services/scanOrchestrator');
 const pineconeService = require('../services/pineconeService');
 const db = require('../db');
 
@@ -86,6 +87,13 @@ const networkWorker = new Worker('network-scan', async (job) => {
   logger.info(`[Worker:NetworkScan] Done: ${JSON.stringify(result)}`);
   return result;
 }, { connection: conn, concurrency: 3 });
+
+// ─── Scan Query Worker (chat-based network-of-network scan) ────────────────
+const scanQueryWorker = new Worker('scan-query', async (job) => {
+  const { scanId } = job.data;
+  logger.info(`[Worker:Scan] Running scan ${scanId}`);
+  return await runScanQuery(scanId);
+}, { connection: conn, concurrency: 4 });
 
 // ─── Notification Worker ───────────────────────────────────────────────────
 const notificationWorker = new Worker('notifications', async (job) => {
@@ -237,7 +245,7 @@ const profileMonitorWorker = new Worker('profile-monitor', async (job) => {
 }, { connection: conn, concurrency: 5 });
 
 // Error handlers
-[enrichmentWorker, embeddingWorker, messageWorker, networkWorker, notificationWorker, profileMonitorWorker].forEach(w => {
+[enrichmentWorker, embeddingWorker, messageWorker, networkWorker, scanQueryWorker, notificationWorker, profileMonitorWorker].forEach(w => {
   w.on('failed', (job, err) => {
     logger.error(`[Worker] Job ${job?.id} in ${w.name} failed: ${err.message}`);
 
@@ -250,6 +258,6 @@ const profileMonitorWorker = new Worker('profile-monitor', async (job) => {
   });
 });
 
-logger.info('Workers running: enrichment, embedding, message-parse, network-scan, notifications, profile-monitor');
+logger.info('Workers running: enrichment, embedding, message-parse, network-scan, scan-query, notifications, profile-monitor');
 
-module.exports = { enrichmentWorker, embeddingWorker, messageWorker, networkWorker, notificationWorker, profileMonitorWorker };
+module.exports = { enrichmentWorker, embeddingWorker, messageWorker, networkWorker, scanQueryWorker, notificationWorker, profileMonitorWorker };

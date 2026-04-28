@@ -80,6 +80,16 @@ const profileMonitorQueue = new Queue('profile-monitor', {
   },
 });
 
+// Chat-based network scan (Sprint 1 P0). Single attempt — failures persist
+// to the scans row, no value in retrying an LLM-driven query that errored.
+const scanQueryQueue = new Queue('scan-query', {
+  connection: getRedisConnection(),
+  defaultJobOptions: {
+    ...defaultJobOptions,
+    attempts: 1,
+  },
+});
+
 module.exports = {
   enrichQueue,
   embedQueue,
@@ -87,5 +97,6 @@ module.exports = {
   networkScanQueue,
   notificationQueue,
   profileMonitorQueue,
+  scanQueryQueue,
   getRedisConnection,
 };
