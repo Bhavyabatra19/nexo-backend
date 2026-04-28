@@ -120,8 +120,24 @@ const aiLimiter = rateLimit({
   message: { success: false, error: 'AI rate limit exceeded, please slow down' },
 });
 
-// Body parsing
-app.use(bodyParser.json({ limit: '10mb' }));
+// Body parsing.
+// `verify` catches the classic "client set Content-Type: application/json but
+// the body is actually multipart/form-data" bug — that combination would otherwise
+// cause JSON.parse to throw on the boundary marker ("------WebKit...") with a
+// confusing error. We detect the boundary preamble and surface a clear message.
+app.use(bodyParser.json({
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    if (buf && buf.length >= 6 && buf.slice(0, 6).toString('utf8') === '------') {
+      const err = new Error(
+        'Body looks like multipart/form-data but Content-Type is application/json. ' +
+        'For file uploads, do not set Content-Type on the client — let the browser set it with the multipart boundary.'
+      );
+      err.status = 400;
+      throw err;
+    }
+  },
+}));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 
