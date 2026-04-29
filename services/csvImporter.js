@@ -42,12 +42,49 @@ function normalizeKey(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-// Streaming-style CSV record parser. Returns array of arrays (raw cells).
-// Handles quoted fields with embedded commas, newlines, and escaped quotes.
-function parseCsvText(text) {
+// Sniff the delimiter from the first ~20 non-empty lines. Picks whichever of
+// `,`, `\t`, `;` appears with the most consistent count > 1 across lines —
+// covers Excel "Save as CSV (UTF-8)", Sheets-pasted TSV, and EU semicolon CSVs.
+function detectDelimiter(text) {
+  const candidates = [',', '\t', ';'];
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length).slice(0, 20);
+  if (!lines.length) return ',';
+
+  // Count occurrences of each candidate per line, ignoring quoted regions.
+  function countOutsideQuotes(line, delim) {
+    let n = 0, inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') { inQ = !inQ; continue; }
+      if (!inQ && c === delim) n++;
+    }
+    return n;
+  }
+
+  let best = ',';
+  let bestScore = -1;
+  for (const d of candidates) {
+    const counts = lines.map(l => countOutsideQuotes(l, d));
+    const nonZero = counts.filter(n => n > 0);
+    if (!nonZero.length) continue;
+    // Score = consistency (most common count appearing across lines) × that count.
+    const freq = new Map();
+    for (const c of nonZero) freq.set(c, (freq.get(c) || 0) + 1);
+    let modeCount = 0, modeFreq = 0;
+    for (const [c, f] of freq) if (f > modeFreq) { modeFreq = f; modeCount = c; }
+    const score = modeFreq * modeCount;
+    if (score > bestScore) { bestScore = score; best = d; }
+  }
+  return best;
+}
+
+// Streaming-style record parser. Returns array of arrays (raw cells).
+// Handles quoted fields with embedded delimiters, newlines, and escaped quotes.
+function parseCsvText(text, delimiter) {
   if (!text) return [];
   // Strip UTF-8 BOM if present.
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const delim = delimiter || detectDelimiter(text);
 
   const rows = [];
   let row = [];
@@ -68,7 +105,7 @@ function parseCsvText(text) {
     }
 
     if (ch === '"') { inQuotes = true; i++; continue; }
-    if (ch === ',') { row.push(cell); cell = ''; i++; continue; }
+    if (ch === delim) { row.push(cell); cell = ''; i++; continue; }
     if (ch === '\r' || ch === '\n') {
       row.push(cell); cell = '';
       // Skip CRLF as a single line break.
@@ -179,12 +216,18 @@ function pick(row, key) {
 function normalizeEmail(s)  { return s ? s.toLowerCase() : null; }
 function normalizeLinkedin(s) {
   if (!s) return null;
-  // Tolerate naked vanity slugs and protocol-less URLs.
   let url = s.trim();
+  // Treat common "no value" strings as missing.
+  if (!url || /^(null|n\/a|none|-)$/i.test(url)) return null;
+  // Strip stray trailing punctuation that creeps in from copy-paste.
+  url = url.replace(/[\])>}.,;\s]+$/g, '');
+  // Tolerate naked vanity slugs and protocol-less URLs.
   if (!/^https?:\/\//i.test(url)) {
-    if (url.startsWith('linkedin.com') || url.startsWith('www.linkedin.com')) url = 'https://' + url;
+    if (/^([a-z]{2}\.)?linkedin\.com/i.test(url) || /^www\.linkedin\.com/i.test(url)) url = 'https://' + url;
     else if (/^[A-Za-z0-9-]+$/.test(url)) url = 'https://www.linkedin.com/in/' + url;
   }
+  // Drop tracking junk (?utm_*, ?lipi=...) — keeps dedup keys stable.
+  url = url.replace(/[?#].*$/, '');
   return url.replace(/\/+$/, '').toLowerCase();
 }
 
