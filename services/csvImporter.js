@@ -211,9 +211,19 @@ function buildContactsFromMapping(rows, mapping) {
     const company     = pick(row, mapping.company);
     const jobTitle    = pick(row, mapping.job_title);
 
-    // Each contact needs at least one durable identifier.
-    if (!fullName && !email && !linkedinUrl) {
-      errors.push({ row: i + 1, reason: 'no name, email, or linkedin_url' });
+    // Both a name and a LinkedIn URL are required — Bright Data enrichment
+    // keys off the URL and the UI keys off the name. Anything missing either
+    // is dropped here with a row-specific reason.
+    if (!fullName && !linkedinUrl) {
+      errors.push({ row: i + 1, reason: 'missing name and linkedin_url' });
+      continue;
+    }
+    if (!fullName) {
+      errors.push({ row: i + 1, reason: 'missing name' });
+      continue;
+    }
+    if (!linkedinUrl) {
+      errors.push({ row: i + 1, reason: 'missing linkedin_url' });
       continue;
     }
 

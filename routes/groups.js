@@ -552,9 +552,9 @@ router.post('/:id/contacts/csv/import', authenticateToken, async (req, res) => {
   if (!mapping || typeof mapping !== 'object') {
     return res.status(400).json({ success: false, error: 'mapping object is required' });
   }
-  const hasIdentifier = mapping.full_name || (mapping.first_name && mapping.last_name) || mapping.email || mapping.linkedin_url;
-  if (!hasIdentifier) {
-    return res.status(400).json({ success: false, error: 'mapping must include full_name (or first+last), email, or linkedin_url' });
+  const hasName = mapping.full_name || (mapping.first_name && mapping.last_name);
+  if (!hasName || !mapping.linkedin_url) {
+    return res.status(400).json({ success: false, error: 'mapping must include both a name (full_name, or first_name + last_name) and linkedin_url' });
   }
 
   // Confirm group exists (FK is set, but a 404 is friendlier than a constraint error).
